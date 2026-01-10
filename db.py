@@ -37,14 +37,36 @@ def get_connection():
     """
     if DB_URL and psycopg2:
         try:
-            # Force SSL mode if not present (Supabase usually needs it)
+            # Force SSL mode
             dsn = DB_URL
             if 'sslmode' not in dsn and 'localhost' not in dsn:
                 if '?' in dsn:
                     dsn += "&sslmode=require"
                 else:
                     dsn += "?sslmode=require"
-                    
+            
+            # WORKAROUND: Streamlit Cloud IPv6 issue with Supabase
+            # Convert hostname to IPv4 address explicitly
+            try:
+                import socket
+                from urllib.parse import urlparse, urlunparse
+                
+                # Parse the URL
+                parsed = urlparse(dsn)
+                hostname = parsed.hostname
+                
+                if hostname and 'supabase.co' in hostname:
+                    # Resolve to IPv4
+                    ipv4 = socket.gethostbyname(hostname)
+                    # Replace hostname with IP in the URL
+                    # Note: We must update the netloc (user:pass@host:port)
+                    new_netloc = parsed.netloc.replace(hostname, ipv4)
+                    parsed = parsed._replace(netloc=new_netloc)
+                    dsn = urlunparse(parsed)
+                    print(f"🔧 Resolved {hostname} to {ipv4} for IPv4 connectivity.")
+            except Exception as dns_error:
+                print(f"⚠️ DNS Resolution failed, trying original DSN: {dns_error}")
+
             return psycopg2.connect(dsn)
         except Exception as e:
             # IMPORTANT: Print error for Streamlit Cloud logs
