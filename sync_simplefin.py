@@ -137,6 +137,14 @@ def sync():
                 # print(f"   Skipping {bank_name} - {account_name}")
                 continue
 
+            # E*Trade Specific Filtering
+            # User wants Salary/RSU but NOT Dividends/Reinvestments
+            if "E*Trade" in bank_name:
+                desc_upper = (tx.get('description') or "").upper()
+                if "DIVIDEND" in desc_upper or "REINVESTMENT" in desc_upper:
+                    # print(f"   Skipping E*Trade Dividend/Reinvestment: {desc_upper}")
+                    continue
+
             raw_amt = float(tx.get('amount', 0))
             
             # Normalization Logic
