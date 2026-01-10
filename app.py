@@ -9,9 +9,11 @@ import requests
 import time
 
 # Secrets Management (Cloud vs Local)
+# Secrets Management (Cloud vs Local)
 SIMPLEFIN_ACCESS_URL = ""
 ADMIN_PASSWORD = None
 VIEWER_PASSWORD = None
+EXPENSE_PASSWORD = None
 
 # 1. Try Streamlit Secrets
 try:
@@ -19,6 +21,7 @@ try:
         SIMPLEFIN_ACCESS_URL = st.secrets.get("SIMPLEFIN_ACCESS_URL", "")
         ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", None)
         VIEWER_PASSWORD = st.secrets.get("VIEWER_PASSWORD", None)
+        EXPENSE_PASSWORD = st.secrets.get("EXPENSE_PASSWORD", None)
 except:
     pass
 
@@ -32,6 +35,8 @@ try:
         ADMIN_PASSWORD = getattr(secrets, 'ADMIN_PASSWORD', None)
     if not VIEWER_PASSWORD:
         VIEWER_PASSWORD = getattr(secrets, 'VIEWER_PASSWORD', None)
+    if not EXPENSE_PASSWORD:
+        EXPENSE_PASSWORD = getattr(secrets, 'EXPENSE_PASSWORD', None)
 except ImportError:
     pass
 
@@ -41,7 +46,7 @@ st.set_page_config(page_title="Money Tracker", layout="wide")
 # AUTHENTICATION
 # ---------------------------------------------------------
 def check_password():
-    """Returns 'admin', 'viewer', or None"""
+    """Returns 'admin', 'full_viewer', 'expense_viewer', or None"""
     if 'role' not in st.session_state:
         st.session_state['role'] = None
 
@@ -55,14 +60,16 @@ def check_password():
         pwd = st.text_input("Enter Password", type="password")
         
         if pwd:
-            # Check Admin
             if ADMIN_PASSWORD and pwd == ADMIN_PASSWORD:
                 st.session_state['role'] = 'admin'
                 st.rerun()
             
-            # Check Viewer
             if VIEWER_PASSWORD and pwd == VIEWER_PASSWORD:
-                st.session_state['role'] = 'viewer'
+                st.session_state['role'] = 'full_viewer'
+                st.rerun()
+                
+            if EXPENSE_PASSWORD and pwd == EXPENSE_PASSWORD:
+                st.session_state['role'] = 'expense_viewer'
                 st.rerun()
                 
             st.error("Incorrect password")
@@ -74,9 +81,17 @@ ROLE = check_password()
 if not ROLE:
     st.stop()
 
+# Privacy Flag
+SHOW_SENSITIVE = (ROLE in ['admin', 'full_viewer'])
+
 # Sidebar Info
 with st.sidebar:
-    st.write(f"Logged in as: **{ROLE.title()}**")
+    role_display = {
+        'admin': 'Admin',
+        'full_viewer': 'Full Viewer',
+        'expense_viewer': 'Expense Viewer (Privacy Mode)'
+    }
+    st.write(f"Logged in as: **{role_display.get(ROLE, ROLE)}**")
     if st.button("Logout"):
         st.session_state['role'] = None
         st.rerun()
@@ -470,6 +485,12 @@ with tab2:
                 return
 
             # Filter Logic (Same as before)
+            
+            # Privacy Mode Filter
+            if not SHOW_SENSITIVE:
+                # Exclude Income and Investment from DataFrame
+                df = df[~df['type'].isin(['Income', 'Investment'])]
+            
             non_expense_cats = ['Transfer', 'Brokerage', 'Roth IRA', 'Credit Card Payment']
             non_reimb_cats = ['Transfer', 'Credit Card Payment']
             
@@ -491,9 +512,15 @@ with tab2:
             
             # Metrics
             k1, k2, k3 = st.columns(3)
-            k1.metric("Total Income", f"${inc:,.0f}")
+            
+            if not SHOW_SENSITIVE:
+                 k1.metric("Total Income", "---")
+                 k3.metric("Net Savings", "---")
+            else:
+                k1.metric("Total Income", f"${inc:,.0f}")
+                k3.metric("Net Savings", f"${sav:,.0f}")
+                
             k2.metric("Total Spent", f"${exp:,.0f}")
-            k3.metric("Net Savings", f"${sav:,.0f}")
             
             # Charts
             st.subheader("Category Breakdown")
@@ -571,7 +598,10 @@ with tab3:
 
     data, error = fetch_balances()
     
-    if error:
+    if not SHOW_SENSITIVE:
+        st.warning("🔒 Privacy Mode Enabled. Net Worth Hidden.")
+        st.metric("Total Net Worth", "****")
+    elif error:
         st.error(f"Error fetching balances: {error}")
     elif data:
         accounts = data.get('accounts', [])
@@ -690,6 +720,9 @@ with tab4:
 
         # Apply Filters
         filtered_df = all_df.copy()
+        
+        if not SHOW_SENSITIVE:
+            filtered_df = filtered_df[~filtered_df['type'].isin(['Income', 'Investment'])]
         
         if search_term:
             filtered_df = filtered_df[

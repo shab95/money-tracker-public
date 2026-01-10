@@ -26,7 +26,8 @@ It aggregates data from **SimpleFin** (Banks, Credit Cards) and provides powerfu
 ### 🔐 Authentication & Security
 *   **Role-Based Access**:
     *   **Admin**: Full access (Sync, Approve, Edit, Upload).
-    *   **Viewer**: Read-only access to Dashboard and Search.
+    *   **Full Viewer**: Read-only access to all data (including Net Worth).
+    *   **Expense Viewer**: "Privacy Mode" - Hides Net Worth, Income, and Investments (Expenses Only).
 *   **Cloud Secrets**: Passwords and Keys managed securely via `st.secrets`.
 
 ### 📱 Venmo Integration
@@ -54,6 +55,7 @@ It aggregates data from **SimpleFin** (Banks, Credit Cards) and provides powerfu
         SIMPLEFIN_ACCESS_URL = "..."
         ADMIN_PASSWORD = "..."
         VIEWER_PASSWORD = "..."
+        EXPENSE_PASSWORD = "..."
         ```
 
 ### Running Locally
