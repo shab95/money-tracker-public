@@ -116,14 +116,22 @@ def sync():
                 should_skip = True
                 
             # Check 3: Check Bank Name for "E*Trade" or "Robinhood" or "Fidelity"
-            # But wait, Fidelity might offer Checking? Ideally filter by account type.
-            # For now, blindly trusting the keywords is safer given user request.
-            # User specifically listed: Fidelity, Robinhood as "cant touch".
-            # If they have a Fidelity Checking, this might block it if it's named "Brokerage".
-            # E*Trade is all investment usually.
+            # User update: Wants to track "E*Trade" because Salary/RSU hits there.
+            # We keep blocking Robinhood/Fidelity if not requested.
             
-            if "E*Trade" in bank_name or "Robinhood" in bank_name:
+            if "Robinhood" in bank_name:
                 should_skip = True
+                
+            # if "E*Trade" in bank_name:
+            #    should_skip = True -- Unblocked per user request to capture Salary
+            
+            # Special Exception: If it's E*Trade, we might want to Ignore "Stock Plan" keyword block above?
+            # The keyword block runs first.
+            if "E*Trade" in bank_name and should_skip:
+                # If it was skipped purely due to keywords like "Stock Plan" or "Brokerage", un-skip it?
+                # But maybe "Stock Plan" is just shares, not cash? 
+                # Let's assume user wants to see it.
+                should_skip = False
                 
             if should_skip:
                 # print(f"   Skipping {bank_name} - {account_name}")
