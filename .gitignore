@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+app_secrets.py
+raw_data/
+Financial Statements/
+*.db
+*.csv
+money_wrapped_2024/

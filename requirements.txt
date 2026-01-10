@@ -1,0 +1,6 @@
+streamlit
+pandas
+altair
+requests
+psycopg2-binary
+playwright
