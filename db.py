@@ -36,7 +36,26 @@ def get_connection():
     Else returns SQLite connection.
     """
     if DB_URL and psycopg2:
-        return psycopg2.connect(DB_URL)
+        try:
+            # Force SSL mode if not present (Supabase usually needs it)
+            dsn = DB_URL
+            if 'sslmode' not in dsn and 'localhost' not in dsn:
+                if '?' in dsn:
+                    dsn += "&sslmode=require"
+                else:
+                    dsn += "?sslmode=require"
+                    
+            return psycopg2.connect(dsn)
+        except Exception as e:
+            # IMPORTANT: Print error for Streamlit Cloud logs
+            print(f"❌ DATABASE CONNECTION FAILED: {e}")
+            # If streamlit is available, show it (but be careful of leaking secrets)
+            try:
+                import streamlit as st
+                st.error(f"Database Connection Error: {e}")
+            except:
+                pass
+            raise e
     else:
         return sqlite3.connect(DB_FILE)
 
