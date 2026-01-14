@@ -314,6 +314,71 @@ with tab1:
     with col1:
         st.markdown("### Review Pending Transactions")
         st.caption("Categorize and approve new transactions here.")
+
+        if ROLE == 'admin':
+            # --- Salary Reminder ---
+            # Check last 6 months for missing salary
+            missing_months = []
+            conn = db.get_connection()
+            try:
+                # Check previous 6 months (excluding current)
+                for i in range(1, 7):
+                    check_date = pd.Timestamp.now() - pd.DateOffset(months=i)
+                    m_str = check_date.strftime('%Y-%m')
+                    m_nice = check_date.strftime('%B %Y')
+                    
+                    # Query: Check for Income from E*Trade in that month
+                    q = f"SELECT date FROM transactions WHERE (account LIKE '%E*Trade%' OR method LIKE '%E*Trade%') AND type = 'Income' AND date LIKE '{m_str}%'"
+                    check_df = pd.read_sql_query(q, conn)
+                    
+                    if check_df.empty:
+                        missing_months.append(m_nice)
+                
+                if missing_months:
+                    st.warning(f"⚠️ Missing E*Trade salary entries for: {', '.join(missing_months)}")
+            except Exception as e:
+                # st.error(e)
+                pass
+            finally:
+                conn.close()
+
+            # --- Manual Entry Form ---
+            with st.expander("➕ Add Manual / E*Trade Transaction"):
+                # REMOVED st.form to allow dynamic updates
+                c1, c2 = st.columns(2)
+                with c1:
+                    m_date = st.date_input("Date", value=today)
+                    m_desc = st.text_input("Description", value="E*Trade Income - Stock Plan")
+                with c2:
+                    m_price = st.number_input("Purchase Price ($)", min_value=0.0, step=0.01, format="%.2f")
+                    m_qty = st.number_input("Quantity", min_value=0.0, step=0.001, format="%.3f")
+                
+                m_amount = m_price * m_qty
+                st.info(f"Total Amount: **${m_amount:,.2f}**")
+                
+                if st.button("Add Transaction"):
+                    if m_amount > 0:
+                        new_tx = {
+                            'date': m_date.strftime('%Y-%m-%d'),
+                            'description': m_desc,
+                            'amount': m_amount,
+                            'category': 'Salary', # Default to Salary for E*Trade
+                            'type': 'Income',
+                            'method': 'Manual Entry - E*Trade',
+                            'account': 'E*Trade',
+                            'posted_date': m_date.strftime('%Y-%m-%d'),
+                            'status': 'REVIEWED', # Auto-approve manual entries? Or PENDING? User likely wants it done. Let's say PENDING to be safe, or REVIEWED since they just typed it. Let's go PENDING so they can see it in Inbox.
+                            'user_notes': f"Price: ${m_price} * Qty: {m_qty}",
+                            'tags': 'manual_entry'
+                        }
+                        
+                        db.upsert_transactions(pd.DataFrame([new_tx]))
+                        st.success("Transaction added!")
+                        st.balloons()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Amount must be greater than 0")
     
     with col2:
         if ROLE == 'admin':

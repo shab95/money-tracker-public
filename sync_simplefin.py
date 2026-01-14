@@ -139,8 +139,8 @@ def sync():
             if "Robinhood" in bank_name:
                 should_skip = True
                 
-            # if "E*Trade" in bank_name:
-            #    should_skip = True -- Unblocked per user request to capture Salary
+            if "E*Trade" in bank_name:
+               should_skip = True
             
             # Special Exception: If it's E*Trade, we might want to Ignore "Stock Plan" keyword block above?
             # The keyword block runs first.
