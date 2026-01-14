@@ -5,14 +5,31 @@ import os
 from datetime import datetime, timedelta
 import db
 
+# ---------------------------------------------------------
+# Secrets Management
+# ---------------------------------------------------------
+SIMPLEFIN_SETUP_TOKEN = ""
+SIMPLEFIN_ACCESS_URL = ""
+
+# 1. Try Streamlit Secrets (Cloud)
+try:
+    import streamlit as st
+    if hasattr(st, 'secrets'):
+        SIMPLEFIN_SETUP_TOKEN = st.secrets.get("SIMPLEFIN_SETUP_TOKEN", "")
+        SIMPLEFIN_ACCESS_URL = st.secrets.get("SIMPLEFIN_ACCESS_URL", "")
+except Exception:
+    pass
+
+# 2. Try Local Secrets (app_secrets.py) - Overrides if present
 try:
     import app_secrets as secrets
-    SIMPLEFIN_SETUP_TOKEN = getattr(secrets, 'SIMPLEFIN_SETUP_TOKEN', "")
-    SIMPLEFIN_ACCESS_URL = getattr(secrets, 'SIMPLEFIN_ACCESS_URL', "")
+    if getattr(secrets, 'SIMPLEFIN_SETUP_TOKEN', None):
+        SIMPLEFIN_SETUP_TOKEN = secrets.SIMPLEFIN_SETUP_TOKEN
+    if getattr(secrets, 'SIMPLEFIN_ACCESS_URL', None):
+        SIMPLEFIN_ACCESS_URL = secrets.SIMPLEFIN_ACCESS_URL
 except ImportError:
-    SIMPLEFIN_SETUP_TOKEN = ""
-    SIMPLEFIN_ACCESS_URL = ""
-    print("⚠️  'app_secrets.py' not found.")
+    if not SIMPLEFIN_ACCESS_URL:
+        print("⚠️  'app_secrets.py' not found and no Cloud secrets detected.")
 
 def claim_access_url(setup_token):
     try:
