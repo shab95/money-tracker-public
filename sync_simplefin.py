@@ -144,11 +144,8 @@ def sync():
             
             # Special Exception: If it's E*Trade, we might want to Ignore "Stock Plan" keyword block above?
             # The keyword block runs first.
-            if "E*Trade" in bank_name and should_skip:
-                # If it was skipped purely due to keywords like "Stock Plan" or "Brokerage", un-skip it?
-                # But maybe "Stock Plan" is just shares, not cash? 
-                # Let's assume user wants to see it.
-                should_skip = False
+            # Special Exception Removed: We want to SKIP all E*Trade now.
+            # (Old logic removed that un-skipped it)
                 
             if should_skip:
                 # print(f"   Skipping {bank_name} - {account_name}")

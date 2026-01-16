@@ -358,18 +358,22 @@ with tab1:
                 
                 if st.button("Add Transaction"):
                     if m_amount > 0:
+                        # Construct description to match historical format
+                        # Format: "E*Trade Income (Manual: {qty} @ ${price})"
+                        formatted_desc = f"E*Trade Income (Manual: {m_qty:.3f} @ ${m_price:.2f})"
+                        
                         new_tx = {
                             'date': m_date.strftime('%Y-%m-%d'),
-                            'description': m_desc,
+                            'description': formatted_desc,
                             'amount': m_amount,
-                            'category': 'Salary', # Default to Salary for E*Trade
+                            'category': 'Salary', 
                             'type': 'Income',
-                            'method': 'Manual Entry - E*Trade',
+                            'method': 'E*Trade - Manual', # Matches historical 'E*Trade - Manual'
                             'account': 'E*Trade',
                             'posted_date': m_date.strftime('%Y-%m-%d'),
-                            'status': 'REVIEWED', # Auto-approve manual entries? Or PENDING? User likely wants it done. Let's say PENDING to be safe, or REVIEWED since they just typed it. Let's go PENDING so they can see it in Inbox.
-                            'user_notes': f"Price: ${m_price} * Qty: {m_qty}",
-                            'tags': 'manual_entry'
+                            'status': 'REVIEWED', 
+                            'user_notes': "Historical Salary/RSU/ESPP", # Matches historical notes
+                            'tags': 'aspp' # Matches historical 'aspp' tag
                         }
                         
                         db.upsert_transactions(pd.DataFrame([new_tx]))
