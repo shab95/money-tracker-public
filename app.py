@@ -593,7 +593,26 @@ with tab2:
             
             # Charts
             st.subheader("Category Breakdown")
-            cat_df = exp_df.groupby('category')['amount'].sum().sort_values(ascending=False)
+            
+            # 1. Gross Expenses by Category
+            gross_exp_by_cat = exp_df.groupby('category')['amount'].sum()
+            
+            # 2. Reimbursements by Category
+            reimb_df = df[reimb_mask]
+            reimb_by_cat = reimb_df.groupby('category')['amount'].sum()
+            
+            # 3. Net Expenses (Gross - Reimbursements)
+            # Use .sub with fill_value=0 to handle categories that exist in one but not the other
+            net_exp_by_cat = gross_exp_by_cat.sub(reimb_by_cat, fill_value=0)
+            
+            # 4. Sort and Display
+            # We filter out <= 0 to keep the chart focused on "Expenses", 
+            # unless user wants to see "Net Profit" categories? 
+            # Standard breakdown usually implies "Where did I spend money?". 
+            # If I made money on a category (Net < 0), it shouldn't be in expense breakdown.
+            # But let's just show everything for transparency first.
+            
+            cat_df = net_exp_by_cat.sort_values(ascending=False)
             st.bar_chart(cat_df)
             
             # --- Monthly Cash Flow (Optional) ---
@@ -605,7 +624,7 @@ with tab2:
             st.dataframe(display_df, use_container_width=True)
 
         # --- Sub-Tabs ---
-        sub1, sub2, sub3, sub4 = st.tabs(["All Time", "Year to Date", "This Month", "This Week"])
+        sub1, sub2, sub3, sub4, sub5 = st.tabs(["All Time", "Year to Date", "This Month", "This Week", "Custom"])
         
         with sub1:
             st.caption("All transactions history")
@@ -637,6 +656,32 @@ with tab2:
             week_mask = all_df['date'] >= start_of_week
             week_df = all_df[week_mask]
             render_dashboard_view(week_df)
+            
+        with sub5:
+            st.caption("Select a custom date range")
+            
+            # Date Picker
+            today = pd.Timestamp.now().date()
+            start_of_month = today.replace(day=1)
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                custom_start = st.date_input("Start Date", value=start_of_month)
+            with c2:
+                custom_end = st.date_input("End Date", value=today)
+            
+            if custom_start <= custom_end:
+                # Filter
+                # Convert to Timestamp for comparison (since all_df['date'] is datetime)
+                start_ts = pd.Timestamp(custom_start)
+                end_ts = pd.Timestamp(custom_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1) # End of day
+                
+                custom_mask = (all_df['date'] >= start_ts) & (all_df['date'] <= end_ts)
+                custom_df = all_df[custom_mask]
+                
+                render_dashboard_view(custom_df, show_monthly_flow=True)
+            else:
+                st.error("Start Date must be before End Date.")
             
     else:
         st.write("No data yet.")
@@ -739,7 +784,7 @@ with tab3:
         hist_df = db.get_net_worth_history()
         if not hist_df.empty:
             hist_df['date'] = pd.to_datetime(hist_df['date'])
-            st.area_chart(hist_df.set_index('date')['total_nw'])
+            st.line_chart(hist_df.set_index('date')['total_nw'])
         else:
             st.write("No history yet.")
 
