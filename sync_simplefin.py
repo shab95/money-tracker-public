@@ -4,6 +4,7 @@ import pandas as pd
 import os
 from datetime import datetime, timedelta
 import db
+import ml_utils
 
 # ---------------------------------------------------------
 # Secrets Management
@@ -159,33 +160,45 @@ def sync():
                     # print(f"   Skipping E*Trade Dividend/Reinvestment: {desc_upper}")
                     continue
 
+            # Raw amount handling
             raw_amt = float(tx.get('amount', 0))
             
-            # Normalization Logic
-            # SimpleFin: usually negative = expense, positive = income
-            # App Convention: Amount always positive. Type determines sign.
+            # --- ML PREDICTION ---
+            description = tx.get('description') or tx.get('memo') or 'No Desc'
             
-            if raw_amt < 0:
-                amount = abs(raw_amt)
-                tx_type = 'Expense'
-            else:
-                amount = raw_amt
-                tx_type = 'Income'
-                
+            # Predict Category and Type
+            # We pass raw_amt (signed) because Type depends on sign.
+            pred = ml_utils.classifier.predict(description, raw_amt)
+            
+            # Use Prediction
+            category = pred.get('category', 'Uncategorized')
+            tx_type = pred.get('type', 'Expense') # Default handled by predictor usually
+            confidence = pred.get('confidence', 0.0)
+            
+            # Force absolute amount for storage
+            amount = abs(raw_amt)
+            
+            # Add "🤖" to notes if confidence is low? 
+            # Or just log it. Let's add it to user_notes if uncertain.
+            user_notes = ""
+            if confidence < 0.6:
+                user_notes = f"🤖 Low Confidence ({int(confidence*100)}%)"
+
             raw_date_ts = tx.get('posted')
             date_str = datetime.fromtimestamp(raw_date_ts).strftime('%Y-%m-%d')
             
             all_txs.append({
                 'date': date_str,
-                'description': tx.get('description') or tx.get('memo') or 'No Desc',
+                'description': description,
                 'amount': amount,
-                'category': 'Uncategorized', 
+                'category': category, 
                 'type': tx_type,
                 'method': f"{bank_name} - {account_name}",
                 'account': account_name,
                 'posted_date': date_str,
                 'details': tx.get('memo', ''),
                 'status': 'PENDING',
+                'user_notes': user_notes,
                 'raw_data': str(tx)
             })
             

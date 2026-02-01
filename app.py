@@ -100,6 +100,11 @@ with st.sidebar:
     
     # Admin Features
     if ROLE == 'admin':
+        if st.button("🧠 Train ML Model"):
+            with st.spinner("Training model..."):
+                import ml_utils
+                msg = ml_utils.classifier.train()
+                st.success(f"Training Complete: {msg}")
         with st.expander("📥 Import Data"):
             st.caption("1. Get CSV from Venmo")
             # Dynamic Link Generation
