@@ -425,7 +425,7 @@ with tab1:
         # Define desired column order
         # User Request: Date, Type, Amount, Category, Description, Notes, Tags, Approve
         column_order = [
-            "date", "type", "amount", "category", 
+            "date", "account", "type", "amount", "category", 
             "description", "user_notes", "tags", "Approve"
         ]
         
@@ -437,6 +437,12 @@ with tab1:
                     "Done?",
                     help="Check to mark as Reviewed",
                     default=False,
+                    width="small"
+                ),
+                "account": st.column_config.TextColumn(
+                    "Account",
+                    help="Source Account",
+                    disabled=True,
                     width="small"
                 ),
                 "type": st.column_config.SelectboxColumn(
