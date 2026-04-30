@@ -151,6 +151,8 @@ Database behavior:
 The app only uses the production database when:
 
 - `MONEY_TRACKER_ENV=production`, or
+- it is running on Streamlit Cloud with `DB_CONNECTION_STRING` or
+  `DIRECT_CONNECTION` configured in Streamlit secrets, or
 - `MONEY_TRACKER_USE_PRODUCTION_DB=1`
 
 This is deliberate. A local app run should not mutate production unless you
@@ -220,7 +222,11 @@ VIEWER_PASSWORD = "..."
 EXPENSE_PASSWORD = "..."
 ```
 
-Production uses Supabase/Postgres only when production mode is explicit.
+`MONEY_TRACKER_ENV = "production"` is recommended for clarity. As a safety net,
+Streamlit Cloud also uses Supabase/Postgres automatically when database secrets
+are present and no explicit app mode is configured. Local runs with
+`.streamlit/secrets.toml` still default to SQLite unless you set
+`MONEY_TRACKER_ENV=production` or `MONEY_TRACKER_USE_PRODUCTION_DB=1`.
 
 ## Data Repair
 
@@ -304,4 +310,3 @@ The test suite covers:
 - QA mode is for real-data testing without Supabase writes.
 - Production database writes should happen only through explicit production
   mode.
-
