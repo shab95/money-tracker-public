@@ -4,19 +4,55 @@ import os
 VALID_ENVS = {"local", "test", "qa", "production"}
 
 
-def get_secret_env():
+def get_streamlit_secret(name, default=None):
     try:
         import streamlit as st
 
         if hasattr(st, "secrets"):
-            return st.secrets.get("MONEY_TRACKER_ENV") or st.secrets.get("APP_ENV")
+            return st.secrets.get(name, default)
     except Exception:
-        return None
-    return None
+        return default
+    return default
+
+
+def get_secret_env():
+    return get_streamlit_secret("MONEY_TRACKER_ENV") or get_streamlit_secret("APP_ENV")
+
+
+def has_streamlit_database_secret():
+    return bool(
+        get_streamlit_secret("DB_CONNECTION_STRING")
+        or get_streamlit_secret("DIRECT_CONNECTION")
+    )
+
+
+def is_streamlit_cloud_runtime():
+    """
+    Streamlit Community Cloud does not provide one guaranteed environment flag.
+    These markers are intentionally narrow so local `.streamlit/secrets.toml`
+    files do not accidentally enable the production DB.
+    """
+    if os.getenv("STREAMLIT_CLOUD") or os.getenv("IS_STREAMLIT_SHARING"):
+        return True
+    if os.getenv("USER") == "appuser" and os.getenv("HOME") == "/home/appuser":
+        return True
+    if os.getenv("USER") == "appuser" and os.path.exists("/mount/src"):
+        return True
+    return False
 
 
 def get_app_env():
-    env = (os.getenv("MONEY_TRACKER_ENV") or get_secret_env() or "local").strip().lower()
+    explicit_env = os.getenv("MONEY_TRACKER_ENV") or get_secret_env()
+    if explicit_env:
+        env = explicit_env.strip().lower()
+        if env not in VALID_ENVS:
+            return "local"
+        return env
+
+    if is_streamlit_cloud_runtime() and has_streamlit_database_secret():
+        return "production"
+
+    env = "local"
     if env not in VALID_ENVS:
         return "local"
     return env
