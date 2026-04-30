@@ -3,10 +3,64 @@ import streamlit as st
 import pandas as pd
 import db
 import sync_simplefin
+import account_classifier
 import math
 from datetime import datetime, timedelta
-import requests
 import time
+
+
+def is_duplicate_connection(skip_reason):
+    return str(skip_reason or "").startswith("duplicate_connection")
+
+
+def has_balance(value):
+    return pd.notna(value)
+
+
+def used_in_net_worth(row):
+    return not is_duplicate_connection(row.get("skip_reason")) and has_balance(row.get("balance"))
+
+
+def connection_action(row):
+    if is_duplicate_connection(row.get("skip_reason")):
+        return "No action"
+    if bool(row.get("possibly_stale")):
+        return "Check SimpleFIN"
+    if not has_balance(row.get("balance")) and int(row.get("transaction_count", 0) or 0) == 0:
+        return "Check SimpleFIN"
+    if bool(row.get("included")) and int(row.get("transaction_count", 0) or 0) == 0:
+        return "Check if activity expected"
+    return "No action"
+
+
+def connection_health_label(row):
+    if is_duplicate_connection(row.get("skip_reason")):
+        return "Duplicate"
+    if bool(row.get("possibly_stale")):
+        return "Possibly stale"
+    return row.get("health_status", "Needs review")
+
+
+def render_bank_sync_button(key="sync_with_banks"):
+    if ROLE != 'admin':
+        st.caption("Syncing disabled for Viewers")
+        return
+    if st.button("🔄 Sync with Banks", key=key):
+        with st.spinner("Fetching latest data..."):
+            try:
+                report = sync_simplefin.sync()
+                if report and report.get('status') == 'success':
+                    st.success(
+                        f"Sync complete: {report.get('transactions_inserted', 0)} new, "
+                        f"{report.get('duplicates', 0)} duplicates."
+                    )
+                    st.session_state['last_sync_report'] = report
+                else:
+                    st.error(f"Sync failed: {(report or {}).get('error', 'unknown error')}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Sync failed: {e}")
+
 
 # Secrets Management (Cloud vs Local)
 # Secrets Management (Cloud vs Local)
@@ -103,8 +157,37 @@ with st.sidebar:
         if st.button("🧠 Train ML Model"):
             with st.spinner("Training model..."):
                 import ml_utils
-                msg = ml_utils.classifier.train()
-                st.success(f"Training Complete: {msg}")
+                report = ml_utils.classifier.train()
+                if report.get('status') == 'success':
+                    st.success("Training complete")
+                else:
+                    st.warning(f"Training status: {report.get('status')}")
+                st.caption(
+                    f"Category: {report.get('category_model')} "
+                    f"({report.get('category_samples', 0)} samples) | "
+                    f"Type: {report.get('type_model')} "
+                    f"({report.get('type_samples', 0)} samples)"
+                )
+                st.caption(
+                    f"Training data: {report.get('reviewed_samples', 0)} reviewed "
+                    f"of {report.get('total_samples', 0)} total transactions"
+                )
+                st.caption(
+                    f"Saved file: {report.get('model_saved_file')} | "
+                    f"Saved DB: {report.get('model_saved_database')} | "
+                    f"Trained at: {report.get('trained_at')}"
+                )
+                for warning in report.get('warnings', []):
+                    st.warning(warning)
+        try:
+            import ml_utils
+            ml_status = ml_utils.classifier.get_status()
+            st.caption(
+                f"ML loaded: {ml_status.get('category_model_loaded') or ml_status.get('type_model_loaded')} "
+                f"from {ml_status.get('load_source') or 'none'}"
+            )
+        except Exception:
+            pass
         with st.expander("📥 Import Data"):
             st.caption("1. Get CSV from Venmo")
             # Dynamic Link Generation
@@ -309,100 +392,18 @@ st.title("💸 Continuous Money Tracker")
 # ---------------------------------------------------------
 # TABS
 # ---------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["📥 Inbox", "📈 Trends", "💰 Net Worth", "🔎 Search"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥 Inbox", "🔌 Connections", "📈 Trends", "💰 Net Worth", "🔎 Search"])
 
 # ---------------------------------------------------------
 # TAB 1: INBOX
 # ---------------------------------------------------------
 with tab1:
-    col1, col2 = st.columns([3, 1])
-    with col1:
+    header_col, sync_col = st.columns([3, 1])
+    with header_col:
         st.markdown("### Review Pending Transactions")
         st.caption("Categorize and approve new transactions here.")
-
-        if ROLE == 'admin':
-            # --- Salary Reminder ---
-            # Check last 6 months for missing salary
-            missing_months = []
-            conn = db.get_connection()
-            try:
-                # Check previous 6 months (excluding current)
-                for i in range(1, 7):
-                    check_date = pd.Timestamp.now() - pd.DateOffset(months=i)
-                    m_str = check_date.strftime('%Y-%m')
-                    m_nice = check_date.strftime('%B %Y')
-                    
-                    # Query: Check for Income from E*Trade in that month
-                    q = f"SELECT date FROM transactions WHERE (account LIKE '%E*Trade%' OR method LIKE '%E*Trade%') AND type = 'Income' AND date LIKE '{m_str}%'"
-                    check_df = pd.read_sql_query(q, conn)
-                    
-                    if check_df.empty:
-                        missing_months.append(m_nice)
-                
-                if missing_months:
-                    st.warning(f"⚠️ Missing E*Trade salary entries for: {', '.join(missing_months)}")
-            except Exception as e:
-                # st.error(e)
-                pass
-            finally:
-                conn.close()
-
-            # --- Manual Entry Form ---
-            with st.expander("➕ Add Manual / E*Trade Transaction"):
-                # REMOVED st.form to allow dynamic updates
-                c1, c2 = st.columns(2)
-                with c1:
-                    m_date = st.date_input("Date", value=today)
-                    m_desc = st.text_input("Description", value="E*Trade Income - Stock Plan")
-                with c2:
-                    m_price = st.number_input("Purchase Price ($)", min_value=0.0, step=0.01, format="%.2f")
-                    m_qty = st.number_input("Quantity", min_value=0.0, step=0.001, format="%.3f")
-                
-                m_amount = m_price * m_qty
-                st.info(f"Total Amount: **${m_amount:,.2f}**")
-                
-                if st.button("Add Transaction"):
-                    if m_amount > 0:
-                        # Construct description to match historical format
-                        # Format: "E*Trade Income (Manual: {qty} @ ${price})"
-                        formatted_desc = f"E*Trade Income (Manual: {m_qty:.3f} @ ${m_price:.2f})"
-                        
-                        new_tx = {
-                            'date': m_date.strftime('%Y-%m-%d'),
-                            'description': formatted_desc,
-                            'amount': m_amount,
-                            'category': 'Salary', 
-                            'type': 'Income',
-                            'method': 'E*Trade - Manual', # Matches historical 'E*Trade - Manual'
-                            'account': 'E*Trade',
-                            'posted_date': m_date.strftime('%Y-%m-%d'),
-                            'status': 'REVIEWED', 
-                            'user_notes': "Historical Salary/RSU/ESPP", # Matches historical notes
-                            'tags': 'aspp' # Matches historical 'aspp' tag
-                        }
-                        
-                        db.upsert_transactions(pd.DataFrame([new_tx]))
-                        st.success("Transaction added!")
-                        st.balloons()
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("Amount must be greater than 0")
-    
-    with col2:
-        if ROLE == 'admin':
-            if st.button("🔄 Sync with Banks"):
-                with st.spinner("Fetching latest data..."):
-                    # Run the sync
-                    try:
-                        # Capture stdout? For now just run it.
-                        sync_simplefin.sync()
-                        st.success("Sync complete!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Sync failed: {e}")
-        else:
-            st.caption("Syncing disabled for Viewers")
+    with sync_col:
+        render_bank_sync_button("sync_with_banks_inbox")
 
     # Load Pending Data
     pending_df = db.get_pending_transactions()
@@ -477,7 +478,10 @@ with tab1:
                 ),
                 "id": None, # Hide ID
                 "raw_data": None, # Hide Raw
-                "status": None # Hide Status
+                "status": None, # Hide Status
+                "reviewed_at": None,
+                "reviewed_by": None,
+                "review_source": None
             },
             hide_index=True,
             use_container_width=True,
@@ -510,8 +514,6 @@ with tab1:
                     # Hack: Update ALL edited rows in DB first
                     # (We'll skip this optimization for now and just update the Approved ones)
                     
-                    conn = db.get_connection()
-                    c = conn.cursor()
                     for idx, row in to_approve.iterrows():
                         # Sanitize tags: If list, join by comma. If None, empty string.
                         raw_tags = row.get('tags', '')
@@ -520,20 +522,15 @@ with tab1:
                         else:
                             tags_str = str(raw_tags) if raw_tags is not None else ''
 
-                        ph = '%s' if db.is_postgres() else '?'
-                        c.execute(f'''
-                            UPDATE transactions 
-                            SET category = {ph}, user_notes = {ph}, tags = {ph}, type = {ph}, status = 'REVIEWED'
-                            WHERE id = {ph}
-                        ''', (
+                        db.review_transaction(
+                            row['id'],
                             row['category'], 
                             row['user_notes'], 
                             tags_str,
                             row['type'],
-                            row['id']
-                        ))
-                    conn.commit()
-                    conn.close()
+                            reviewed_by=ROLE,
+                            review_source='manual',
+                        )
                     
                     st.success("Transactions approved!")
                     st.rerun()
@@ -544,13 +541,193 @@ with tab1:
         st.info("🎉 All caught up! No pending transactions.")
         st.balloons()
 
+    if ROLE == 'admin':
+        st.divider()
+        st.markdown("### Admin Tools")
+
+        # --- Salary Reminder ---
+        # Check last 6 months for missing salary
+        missing_months = []
+        conn = db.get_connection()
+        try:
+            # Check previous 6 months (excluding current)
+            for i in range(1, 7):
+                check_date = pd.Timestamp.now() - pd.DateOffset(months=i)
+                m_str = check_date.strftime('%Y-%m')
+                m_nice = check_date.strftime('%B %Y')
+
+                # Query: Check for Income from E*Trade in that month
+                q = f"SELECT date FROM transactions WHERE (account LIKE '%E*Trade%' OR method LIKE '%E*Trade%') AND type = 'Income' AND date LIKE '{m_str}%'"
+                check_df = pd.read_sql_query(q, conn)
+
+                if check_df.empty:
+                    missing_months.append(m_nice)
+
+            if missing_months:
+                st.warning(f"⚠️ Missing E*Trade salary entries for: {', '.join(missing_months)}")
+        except Exception as e:
+            # st.error(e)
+            pass
+        finally:
+            conn.close()
+
+        # --- Manual Entry Form ---
+        with st.expander("➕ Add Manual / E*Trade Transaction"):
+            # REMOVED st.form to allow dynamic updates
+            c1, c2 = st.columns(2)
+            with c1:
+                m_date = st.date_input("Date", value=datetime.now().date())
+                m_desc = st.text_input("Description", value="E*Trade Income - Stock Plan")
+            with c2:
+                m_price = st.number_input("Purchase Price ($)", min_value=0.0, step=0.01, format="%.2f")
+                m_qty = st.number_input("Quantity", min_value=0.0, step=0.001, format="%.3f")
+
+            m_amount = m_price * m_qty
+            st.info(f"Total Amount: **${m_amount:,.2f}**")
+
+            if st.button("Add Transaction"):
+                if m_amount > 0:
+                    # Construct description to match historical format
+                    # Format: "E*Trade Income (Manual: {qty} @ ${price})"
+                    formatted_desc = f"E*Trade Income (Manual: {m_qty:.3f} @ ${m_price:.2f})"
+
+                    new_tx = {
+                        'date': m_date.strftime('%Y-%m-%d'),
+                        'description': formatted_desc,
+                        'amount': m_amount,
+                        'category': 'Salary',
+                        'type': 'Income',
+                        'method': 'E*Trade - Manual', # Matches historical 'E*Trade - Manual'
+                        'account': 'E*Trade',
+                        'posted_date': m_date.strftime('%Y-%m-%d'),
+                        'status': 'REVIEWED',
+                        'user_notes': "Historical Salary/RSU/ESPP", # Matches historical notes
+                        'tags': 'aspp', # Matches historical 'aspp' tag
+                        'reviewed_by': ROLE,
+                        'review_source': 'manual_etrade'
+                    }
+
+                    db.upsert_transactions(pd.DataFrame([new_tx]))
+                    st.success("Transaction added!")
+                    st.balloons()
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Amount must be greater than 0")
+
 # ---------------------------------------------------------
-# TAB 2: TRENDS (The Payoff)
-# ---------------------------------------------------------
-# ---------------------------------------------------------
-# TAB 2: DASHBOARD (Formerly Trends)
+# TAB 2: CONNECTIONS
 # ---------------------------------------------------------
 with tab2:
+    st.header("🔌 SimpleFIN Connections")
+    top_col, action_col = st.columns([3, 1])
+    with top_col:
+        st.caption("Connection health across Inbox and Net Worth.")
+    with action_col:
+        render_bank_sync_button("sync_with_banks_connections")
+
+    try:
+        latest_run, account_results = db.get_latest_sync_account_results()
+        if latest_run.empty:
+            st.info("No sync runs recorded yet.")
+        else:
+            run = latest_run.iloc[0]
+            st.caption(
+                f"Last sync: {run['status']} at {run['finished_at']} | "
+                f"{run['transactions_inserted']} new, {run['duplicates']} duplicates"
+            )
+            if run.get('sync_start_date') and run.get('sync_end_date'):
+                st.caption(f"Transaction window: {run['sync_start_date']} to {run['sync_end_date']}")
+
+            if not account_results.empty:
+                display_sync = account_results.copy()
+                display_sync['included'] = display_sync['included'].astype(bool)
+                display_sync["Used in Inbox"] = display_sync["included"].map(lambda value: "Yes" if value else "No")
+                display_sync["Used in Net Worth"] = display_sync.apply(
+                    lambda row: "Yes" if used_in_net_worth(row) else "No",
+                    axis=1,
+                )
+                freshness = db.get_balance_freshness()
+                if not freshness.empty:
+                    display_sync = display_sync.merge(
+                        freshness,
+                        on=["bank", "account"],
+                        how="left",
+                    )
+                else:
+                    display_sync["balance_unchanged_since"] = ""
+                    display_sync["days_balance_unchanged"] = 0
+                display_sync["Classification"] = display_sync.apply(
+                    lambda row: account_classifier.classify_account(row["bank"], row["account"], row.get("balance")),
+                    axis=1,
+                )
+                stale_classes = {
+                    account_classifier.TAXABLE_INVESTMENTS,
+                    account_classifier.RETIREMENT_RESTRICTED,
+                }
+                display_sync["possibly_stale"] = (
+                    display_sync["Classification"].isin(stale_classes)
+                    & display_sync["balance"].notna()
+                    & (display_sync["days_balance_unchanged"].fillna(0) >= 30)
+                    & ~display_sync["skip_reason"].fillna("").str.startswith("duplicate_connection")
+                )
+                display_sync["Connection Health"] = display_sync.apply(connection_health_label, axis=1)
+                display_sync["Action"] = display_sync.apply(connection_action, axis=1)
+
+                show_duplicate_connections = st.checkbox(
+                    "Show duplicate connection rows",
+                    value=False,
+                    help="Duplicate rows are still stored for audit, but the app prefers one connection for syncing.",
+                )
+                visible_sync = display_sync
+                if not show_duplicate_connections:
+                    visible_sync = display_sync[
+                        ~display_sync["skip_reason"].fillna("").str.startswith("duplicate_connection")
+                    ]
+
+                needs_review_count = int((visible_sync["Action"] == "Check SimpleFIN").sum())
+                healthy_count = int((visible_sync["Action"] == "No action").sum())
+                data_count = int(
+                    ((visible_sync["transaction_count"].fillna(0) > 0) | visible_sync["balance"].notna()).sum()
+                )
+                inbox_count = int(visible_sync["included"].sum())
+                net_worth_count = int((visible_sync["Used in Net Worth"] == "Yes").sum())
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Healthy", healthy_count, help="Visible connections with no action needed")
+                m2.metric("Needs Review", needs_review_count, help="Visible connections that likely need a SimpleFIN check")
+                m3.metric("Returning Data", data_count, help="Visible connections with a balance or transactions")
+                m4.metric("Used in Inbox", inbox_count)
+                m5.metric("Used in Net Worth", net_worth_count)
+
+                visible_sync = visible_sync.rename(columns={
+                    "bank": "Bank",
+                    "account": "Account",
+                    "transaction_count": "Tx Seen",
+                    "latest_transaction_date": "Latest Tx",
+                    "balance": "Balance",
+                    "currency": "Currency",
+                    "balance_unchanged_since": "Balance Unchanged Since",
+                    "days_balance_unchanged": "Days Unchanged",
+                    "inserted_count": "New",
+                    "duplicate_count": "Duplicates",
+                    "error": "Error",
+                })
+                visible_sync = visible_sync[[
+                    "Bank", "Account", "Connection Health", "Used in Inbox", "Used in Net Worth",
+                    "Tx Seen", "Latest Tx", "Balance", "Currency", "Balance Unchanged Since",
+                    "Days Unchanged", "Action", "New", "Duplicates", "Error"
+                ]]
+                st.dataframe(visible_sync, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.caption(f"Connection status unavailable: {e}")
+
+# ---------------------------------------------------------
+# TAB 3: TRENDS (The Payoff)
+# ---------------------------------------------------------
+# ---------------------------------------------------------
+# TAB 3: DASHBOARD (Formerly Trends)
+# ---------------------------------------------------------
+with tab3:
     st.header("📊 Dashboard")
     
     all_df = db.get_all_transactions()
@@ -698,131 +875,81 @@ with tab2:
         st.write("No data yet.")
 
 # ---------------------------------------------------------
-# TAB 3: NET WORTH
+# TAB 4: NET WORTH
 # ---------------------------------------------------------
-with tab3:
+with tab4:
     st.header("Net Worth & Balances")
     
     col_r1, col_r2 = st.columns([3, 1])
-    if ROLE == 'admin':
-        if col_r2.button("🔄 Refresh Balances"):
-            st.cache_data.clear()
-            st.rerun()
-
-    @st.cache_data(ttl=3600) # Cache for 1 hour
-    def fetch_balances():
-        if not SIMPLEFIN_ACCESS_URL:
-            return None, "Missing API URL"
-        
-        try:
-            res = requests.get(SIMPLEFIN_ACCESS_URL + "/accounts")
-            res.raise_for_status()
-            return res.json(), None
-        except Exception as e:
-            return None, str(e)
-
-    data, error = fetch_balances()
+    with col_r2:
+        render_bank_sync_button("sync_with_banks_net_worth")
     
     if not SHOW_SENSITIVE:
         st.warning("🔒 Privacy Mode Enabled. Net Worth Hidden.")
         st.metric("Total Net Worth", "****")
-    elif error:
-        st.error(f"Error fetching balances: {error}")
-    elif data:
-        accounts = data.get('accounts', [])
-        
-        rows = []
-        
-        # Locked Accounts (Retirement/Penalty)
-        LOCKED_ACCOUNTS = [
-            "CAPITAL ONE 401K ASP",
-            "Self-Directed Brokerage",
-            "Robinhood Roth IRA",
-            "Robinhood managed Roth IRA"
-        ]
-        
-        liquid_nw = 0.0
-        locked_nw = 0.0
-        
-        for acct in accounts:
-            bank = acct.get('org', {}).get('name', 'Unknown Bank')
-            name = acct.get('name', 'Unknown Acct')
-            
-            # Filter Duplicates
-            if bank == "Fidelity 401k":
-                continue
-                
-            bal_str = acct.get('balance', '0')
-            currency = acct.get('currency', 'USD')
-            try:
-                balance = float(bal_str)
-            except:
-                balance = 0.0
-            
-            # Classify
-            is_locked = False
-            # Check if name is exactly in list or similar? User names seemed specific.
-            # Using partial match might be safer or exact match.
-            # User provided exact names in prev tool outputs, so exact match + case insensitive
-            if name in LOCKED_ACCOUNTS:
-                is_locked = True
-                locked_nw += balance
-            else:
-                liquid_nw += balance
-            
-            rows.append({
-                "Bank": bank,
-                "Account": name,
-                "Balance": balance,
-                "Type": "🔒 Locked" if is_locked else "💧 Liquid"
-            })
-            
-        total_nw = liquid_nw + locked_nw
-        
-        # 1. Snapshoting to DB (for History)
-        if rows:
-            nw_df = pd.DataFrame(rows)
-            db.save_balance_snapshot(nw_df)
-
-        # 2. Metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Net Worth", f"${total_nw:,.2f}")
-        m2.metric("💧 Liquid Assets", f"${liquid_nw:,.2f}", help="Available now")
-        m3.metric("🔒 Retirement/Locked", f"${locked_nw:,.2f}", help="Can't touch 'til 60")
-        
-        # 3. History Chart
-        st.subheader("History")
-        hist_df = db.get_net_worth_history()
-        if not hist_df.empty:
-            hist_df['date'] = pd.to_datetime(hist_df['date'])
-            st.line_chart(hist_df.set_index('date')['total_nw'])
+    else:
+        nw_df = db.get_latest_balance_snapshot()
+        if nw_df.empty:
+            st.info("No balance snapshot yet. Use Sync with Banks to refresh account balances.")
         else:
-            st.write("No history yet.")
+            latest_date = nw_df["date"].iloc[0]
+            st.caption(f"Latest snapshot: {latest_date}. Use Sync with Banks to refresh.")
+            nw_df = nw_df.copy()
+            nw_df["classification"] = nw_df["classification"].fillna(account_classifier.CASH)
+            nw_df["balance"] = pd.to_numeric(nw_df["balance"], errors="coerce").fillna(0.0)
 
-        # 4. Details Table
-        st.subheader("Asset Breakdown")
-        if rows:
-            # Sort
-            nw_df = nw_df.sort_values(by=['Type', 'Bank', 'Account'])
+            cash_nw = nw_df[nw_df["classification"] == account_classifier.CASH]["balance"].sum()
+            taxable_investments_nw = nw_df[
+                nw_df["classification"] == account_classifier.TAXABLE_INVESTMENTS
+            ]["balance"].sum()
+            retirement_restricted_nw = nw_df[
+                nw_df["classification"] == account_classifier.RETIREMENT_RESTRICTED
+            ]["balance"].sum()
+            liabilities = nw_df[nw_df["classification"] == account_classifier.LIABILITY]["balance"].sum()
             
-            # Color code debts?
+            total_nw = cash_nw + taxable_investments_nw + retirement_restricted_nw + liabilities
+
+            # 1. Metrics
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Total Net Worth", f"${total_nw:,.2f}")
+            m2.metric("Cash", f"${cash_nw:,.2f}", help="Checking, savings, and cash-like accounts")
+            m3.metric("Taxable Investments", f"${taxable_investments_nw:,.2f}", help="Brokerage, stock plan, crypto, and other non-retirement investments")
+            m4.metric("Retirement / Restricted", f"${retirement_restricted_nw:,.2f}", help="401k, IRA, Roth IRA, HSA, and retirement-style accounts")
+            m5.metric("Liabilities", f"${liabilities:,.2f}", help="Credit cards and debt balances")
+            
+            # 2. History Chart
+            st.subheader("History")
+            hist_df = db.get_net_worth_history()
+            if not hist_df.empty:
+                hist_df['date'] = pd.to_datetime(hist_df['date'])
+                st.line_chart(hist_df.set_index('date')['total_nw'])
+            else:
+                st.write("No history yet.")
+
+            # 3. Details Table
+            st.subheader("Asset Breakdown")
+            display_nw = nw_df.rename(columns={
+                "bank": "Bank",
+                "account": "Account",
+                "balance": "Balance",
+                "classification": "Classification",
+            })[["Bank", "Account", "Balance", "Classification"]]
+            display_nw = display_nw.sort_values(by=['Classification', 'Bank', 'Account'])
+
             def color_balance(val):
                 color = 'red' if val < 0 else 'green'
                 return f'color: {color}'
-            
+
             st.dataframe(
-                nw_df.style.map(color_balance, subset=['Balance']).format({"Balance": "${:,.2f}"}),
+                display_nw.style.map(color_balance, subset=['Balance']).format({"Balance": "${:,.2f}"}),
                 use_container_width=True,
                 height=500
             )
 
-    else:
-        st.info("No account data found.")
-
 # ---------------------------------------------------------
-# TAB 4: SEARCH (Formerly Tab 3)
+# TAB 5: SEARCH
 # ---------------------------------------------------------
-with tab4:
+with tab5:
     st.header("🔍 Transaction Search")
     
     all_df = db.get_all_transactions()
