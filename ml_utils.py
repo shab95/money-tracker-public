@@ -1,6 +1,7 @@
 import pandas as pd
 import pickle
 import os
+from datetime import datetime
 import db
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
@@ -22,10 +23,33 @@ class TransactionClassifier:
         self.cat_model = None
         self.type_model = None
         self.vectorizer = None
+        self.status = {
+            'model_loaded': False,
+            'load_source': None,
+            'last_trained_at': None,
+            'metadata': {}
+        }
         self.load_model()
 
     def load_model(self):
         """Loads the model from disk if it exists."""
+        try:
+            artifact = db.load_ml_artifact(MODEL_FILE)
+            if artifact:
+                data = pickle.loads(artifact['artifact'])
+                self.cat_model = data.get('cat_model')
+                self.type_model = data.get('type_model')
+                self.status.update({
+                    'model_loaded': True,
+                    'load_source': 'database',
+                    'last_trained_at': artifact.get('trained_at'),
+                    'metadata': artifact.get('metadata') or {}
+                })
+                print("✅ ML Model loaded successfully from database.")
+                return self.status
+        except Exception as e:
+            print(f"⚠️ Error loading model from database: {e}")
+
         if os.path.exists(MODEL_FILE):
             try:
                 with open(MODEL_FILE, 'rb') as f:
@@ -35,21 +59,57 @@ class TransactionClassifier:
                     # shared vectorizer if optimized, but pipeline handles it usually.
                     # Actually, if we use pipelines, the vectorizer is inside them.
                     
+                    self.status.update({
+                        'model_loaded': True,
+                        'load_source': 'file',
+                        'metadata': {}
+                    })
                     print("✅ ML Model loaded successfully.")
             except Exception as e:
                 print(f"⚠️ Error loading model: {e}")
                 self.cat_model = None
                 self.type_model = None
+                self.status.update({'model_loaded': False, 'load_source': None})
+        return self.status
 
     def train(self):
         """Fetches data from DB and retrains properties."""
         print("🧠 Training ML Models...")
+        report = {
+            'status': 'started',
+            'trained_at': datetime.now().isoformat(timespec='seconds'),
+            'total_samples': 0,
+            'reviewed_samples': 0,
+            'category_samples': 0,
+            'type_samples': 0,
+            'category_model': 'skipped',
+            'type_model': 'skipped',
+            'model_saved_file': False,
+            'model_saved_database': False,
+            'warnings': [],
+            'error': ''
+        }
         
         # 1. Fetch Data
         df = db.get_all_transactions()
         if df.empty:
             print("❌ No data to train on.")
-            return "No data"
+            report['status'] = 'skipped'
+            report['warnings'].append('No data to train on.')
+            return report
+        report['total_samples'] = len(df)
+        if 'status' in df.columns:
+            reviewed_mask = df['status'].astype(str).str.upper().eq('REVIEWED')
+        else:
+            reviewed_mask = pd.Series(False, index=df.index)
+        if 'reviewed_at' in df.columns:
+            reviewed_mask = reviewed_mask | df['reviewed_at'].notna()
+        df = df[reviewed_mask].copy()
+        report['reviewed_samples'] = len(df)
+        if df.empty:
+            report['status'] = 'skipped'
+            report['warnings'].append('No reviewed transactions to train on.')
+            return report
 
         # Filter out 'Uncategorized' for training Category model
         # For Type model, we can use everything that has a valid Type? 
@@ -61,6 +121,7 @@ class TransactionClassifier:
         cat_df = df[df['category'] != 'Uncategorized']
         cat_df = cat_df[cat_df['category'].notna()]
         cat_df['description'] = cat_df['description'].fillna("") # Fix NoneType error
+        report['category_samples'] = len(cat_df)
     
         if len(cat_df) > 10:
             # We use Description as main feature.
@@ -97,9 +158,11 @@ class TransactionClassifier:
             ])
             
             self.cat_model.fit(cat_df['description'], cat_df['category'])
+            report['category_model'] = 'trained'
             print(f"✅ Category Model trained on {len(cat_df)} samples.")
         else:
             print("⚠️ Not enough categorized data to train Category model.")
+            report['warnings'].append('Not enough categorized data to train category model.')
             
         # Train Type Model (Income vs Expense vs Reimbursement)
         # This is where Amount (+/- from bank) matters. 
@@ -129,9 +192,10 @@ class TransactionClassifier:
         # We need a custom preprocessor that can handle a dict or dataframe logic?
         # Let's use ColumnTransformer on a DataFrame.
         
-        type_features = type_df[['description', 'signed_amount']]
+        type_features = type_df[['description', 'signed_amount']].copy()
         type_features['description'] = type_features['description'].fillna("") # Fix NoneType error
         type_labels = type_df['type']
+        report['type_samples'] = len(type_df)
         
         if len(type_df) > 5:
             self.type_model = Pipeline([
@@ -143,16 +207,38 @@ class TransactionClassifier:
             ])
             
             self.type_model.fit(type_features, type_labels)
+            report['type_model'] = 'trained'
             print(f"✅ Type Model trained on {len(type_df)} samples.")
+        else:
+            report['warnings'].append('Not enough transactions to train type model.')
             
         # Save
-        with open(MODEL_FILE, 'wb') as f:
-            pickle.dump({
-                'cat_model': self.cat_model,
-                'type_model': self.type_model
-            }, f)
-            
-        return "Success"
+        payload = {
+            'cat_model': self.cat_model,
+            'type_model': self.type_model
+        }
+        try:
+            with open(MODEL_FILE, 'wb') as f:
+                pickle.dump(payload, f)
+            report['model_saved_file'] = True
+        except Exception as e:
+            report['warnings'].append(f'Could not save file model: {e}')
+
+        try:
+            trained_at = db.save_ml_artifact(MODEL_FILE, pickle.dumps(payload), report)
+            report['model_saved_database'] = True
+            report['trained_at'] = trained_at
+        except Exception as e:
+            report['warnings'].append(f'Could not save database model: {e}')
+
+        report['status'] = 'success'
+        self.status.update({
+            'model_loaded': bool(self.cat_model or self.type_model),
+            'load_source': 'trained',
+            'last_trained_at': report['trained_at'],
+            'metadata': report
+        })
+        return report
         
     def predict(self, description, signed_amount):
         """
@@ -196,6 +282,13 @@ class TransactionClassifier:
         result['confidence'] = min(result.get('cat_confidence', 0), result.get('type_confidence', 0))
         
         return result
+
+    def get_status(self):
+        return {
+            **self.status,
+            'category_model_loaded': self.cat_model is not None,
+            'type_model_loaded': self.type_model is not None
+        }
 
 # Singleton
 classifier = TransactionClassifier()

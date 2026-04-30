@@ -3,6 +3,8 @@ import requests
 import pandas as pd
 import os
 from datetime import datetime, timedelta
+import account_classifier
+import config
 import db
 import ml_utils
 
@@ -59,7 +61,109 @@ def fetch_data(access_url, start_date=None, end_date=None):
     res.raise_for_status()
     return res.json()
 
+
+def find_duplicate_connection_reasons(accounts):
+    fidelity_seen = {}
+    duplicate_reasons = {}
+    for account in accounts:
+        bank_name = account.get('org', {}).get('name', 'Unknown Bank')
+        account_name = account.get('name', 'Unknown Acct')
+        if bank_name not in ("Fidelity Investments", "Fidelity 401k"):
+            continue
+
+        key = account_classifier.normalize_account_name(account_name)
+        if key not in fidelity_seen:
+            fidelity_seen[key] = (bank_name, account_name)
+            continue
+
+        previous_bank, previous_account = fidelity_seen[key]
+        if previous_bank == "Fidelity Investments" and bank_name == "Fidelity 401k":
+            duplicate_reasons[(bank_name, account_name)] = "duplicate_connection_prefer_fidelity_investments"
+        elif previous_bank == "Fidelity 401k" and bank_name == "Fidelity Investments":
+            duplicate_reasons[(previous_bank, previous_account)] = "duplicate_connection_prefer_fidelity_investments"
+            fidelity_seen[key] = (bank_name, account_name)
+    return duplicate_reasons
+
+
+def get_sync_date_range(now=None):
+    now = now or datetime.now()
+    end_date = now.strftime('%Y-%m-%d')
+    configured_start = os.getenv("MONEY_TRACKER_SIMPLEFIN_START_DATE", "").strip()
+    if configured_start:
+        return configured_start, end_date
+    if config.is_production_env():
+        return '2025-12-01', end_date
+    lookback_days = int(os.getenv("MONEY_TRACKER_LOCAL_SYNC_DAYS", "30"))
+    return (now - timedelta(days=lookback_days)).strftime('%Y-%m-%d'), end_date
+
+
+def transaction_date_from_timestamp(timestamp_value):
+    if not timestamp_value:
+        return ""
+    try:
+        return datetime.fromtimestamp(timestamp_value).strftime('%Y-%m-%d')
+    except Exception:
+        return ""
+
+
+def get_latest_transaction_date(transactions):
+    dates = [transaction_date_from_timestamp(tx.get('posted')) for tx in transactions]
+    dates = [value for value in dates if value]
+    return max(dates) if dates else ""
+
+
+def coerce_balance(balance):
+    try:
+        return float(balance) if balance not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def build_balance_snapshot_rows(accounts, duplicate_reasons):
+    rows = []
+    for account in accounts:
+        bank_name = account.get('org', {}).get('name', 'Unknown Bank')
+        account_name = account.get('name', 'Unknown Acct')
+        if duplicate_reasons.get((bank_name, account_name), ""):
+            continue
+
+        balance = coerce_balance(account.get('balance'))
+        if balance is None:
+            continue
+
+        rows.append({
+            "Bank": bank_name,
+            "Account": account_name,
+            "Balance": balance,
+            "Classification": account_classifier.classify_account(bank_name, account_name, balance),
+        })
+    return rows
+
+
+def get_account_health_status(included, skip_reason, transaction_count, latest_transaction_date, balance=None):
+    if skip_reason.startswith("duplicate_connection"):
+        return "Duplicate"
+    if balance is not None or transaction_count > 0:
+        if transaction_count > 0:
+            return "Healthy"
+        return "Healthy, no activity"
+    if transaction_count > 0:
+        return "Healthy"
+    return "Needs review"
+
+
 def sync():
+    report = {
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": None,
+        "status": "running",
+        "accounts": [],
+        "transactions_seen": 0,
+        "transactions_inserted": 0,
+        "duplicates": 0,
+        "error": "",
+    }
+
     # 1. Auth Logic
     access_url = SIMPLEFIN_ACCESS_URL
     if not access_url and SIMPLEFIN_SETUP_TOKEN:
@@ -68,89 +172,73 @@ def sync():
         print(f"IMPORTANT: Please update app_secrets.py with:\nSIMPLEFIN_ACCESS_URL = '{access_url}'")
     
     if not access_url:
-        print("❌ Authorization failed. Check tokens.")
-        return
+        msg = "Authorization failed. Check tokens."
+        print(f"❌ {msg}")
+        report["status"] = "failed"
+        report["error"] = msg
+        report["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        db.save_sync_report(report)
+        return report
 
-    # 2. Fetch from December 1st, 2025 (Fixed Start)
-    # Reverted 90-day logic per user request to avoid duplicate/old data.
-    end_dt = datetime.now()
-    start_date = '2025-12-01'
-    end_date = end_dt.strftime('%Y-%m-%d')
+    # 2. Fetch data. Production keeps the broad backfill window; local uses a
+    # shorter window so a fresh SQLite database does not reopen months of work.
+    start_date, end_date = get_sync_date_range()
+    report["sync_start_date"] = start_date
+    report["sync_end_date"] = end_date
     
     try:
         json_data = fetch_data(access_url, start_date=start_date, end_date=end_date)
     except Exception as e:
-        print(f"Error fetching from SimpleFin: {e}")
-        return
+        msg = f"Error fetching from SimpleFin: {e}"
+        print(msg)
+        report["status"] = "failed"
+        report["error"] = msg
+        report["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        db.save_sync_report(report)
+        return report
 
     # 3. Process & Normalize
-    all_txs = []
-    
-    for account in json_data.get('accounts', []):
+    accounts = json_data.get('accounts', [])
+    duplicate_reasons = find_duplicate_connection_reasons(accounts)
+    balance_snapshot_rows = build_balance_snapshot_rows(accounts, duplicate_reasons)
+    for account in accounts:
         bank_name = account.get('org', {}).get('name', 'Unknown Bank')
         account_name = account.get('name', 'Unknown Acct')
-        
-        for tx in account.get('transactions', []):
-            # NOISE FILTER: Skip transactions from Locked/Investment Accounts
-            # We track their balances in the Net Worth tab, but we don't need their internal noise in the Inbox.
-            # User Rule: "Only credit cards and checking accounts"
-            # Strategy: Exclude known investment keywords from Account Name OR Bank Name.
-            
-            SKIP_KEYWORDS = [
-                "401K", "401k",
-                "Brokerage", "brokerage",
-                "IRA", "ira",
-                "Investment", "investment",
-                "Stock Plan", "stock plan",
-                "Crypto", "crypto",
-                "Savings", "savings" # If user wants to exclude savings too? User said "savings accounts i cant touch until 60" about some, but usually savings account interest is income. 
-                # User's specifics: "fidelity: CAPITAL ONE 401K", "SimpleFin", "E*Trade"
-            ]
-            
-            # Specific Account Names to Skip (User Specified)
-            SKIP_EXACT = [
-                "CAPITAL ONE 401K ASP",
-                "Self-Directed Brokerage",
-                "Robinhood Roth IRA",
-                "Robinhood managed Roth IRA",
-                "Robinhood managed individual",
-                "Robinhood individual",
-                "Crypto",
-                "Brokerage Health Savings",
-                "Brokerage General Investing Person",
-                "Stock Plan",
-                "Individual Brokerage"
-            ]
-            
-            # Check if we should skip
-            should_skip = False
-            
-            # Check 1: Keywords in Name
-            if any(k in account_name for k in SKIP_KEYWORDS):
-                should_skip = True
-                
-            # Check 2: Exact list
-            if any(exact in account_name for exact in SKIP_EXACT):
-                should_skip = True
-                
-            # Check 3: Check Bank Name for "E*Trade" or "Robinhood" or "Fidelity"
-            # User update: Wants to track "E*Trade" because Salary/RSU hits there.
-            # We keep blocking Robinhood/Fidelity if not requested.
-            
-            if "Robinhood" in bank_name:
-                should_skip = True
-                
-            if "E*Trade" in bank_name:
-               should_skip = True
-            
-            # Special Exception: If it's E*Trade, we might want to Ignore "Stock Plan" keyword block above?
-            # The keyword block runs first.
-            # Special Exception Removed: We want to SKIP all E*Trade now.
-            # (Old logic removed that un-skipped it)
-                
-            if should_skip:
-                # print(f"   Skipping {bank_name} - {account_name}")
-                continue
+        txs = account.get('transactions', [])
+        duplicate_reason = duplicate_reasons.get((bank_name, account_name), "")
+        if duplicate_reason:
+            include_account, skip_reason = False, duplicate_reason
+        else:
+            include_account, skip_reason = account_classifier.should_sync_transactions(bank_name, account_name)
+        latest_transaction_date = get_latest_transaction_date(txs)
+        balance = coerce_balance(account.get('balance'))
+        account_report = {
+            "bank": bank_name,
+            "account": account_name,
+            "included": include_account,
+            "skip_reason": skip_reason,
+            "transaction_count": len(txs),
+            "inserted_count": 0,
+            "duplicate_count": 0,
+            "latest_transaction_date": latest_transaction_date,
+            "balance": balance,
+            "currency": account.get('currency', ''),
+            "health_status": get_account_health_status(
+                include_account,
+                skip_reason,
+                len(txs),
+                latest_transaction_date,
+                balance,
+            ),
+            "error": "",
+        }
+
+        if not include_account:
+            report["accounts"].append(account_report)
+            continue
+
+        account_txs = []
+        for tx in txs:
 
             # E*Trade Specific Filtering
             # User wants Salary/RSU but NOT Dividends/Reinvestments
@@ -184,10 +272,13 @@ def sync():
             if confidence < 0.6:
                 user_notes = f"🤖 Low Confidence ({int(confidence*100)}%)"
 
-            raw_date_ts = tx.get('posted')
-            date_str = datetime.fromtimestamp(raw_date_ts).strftime('%Y-%m-%d')
+            date_str = transaction_date_from_timestamp(tx.get('posted'))
+            if not date_str:
+                account_report["error"] = "transaction_missing_posted_date"
+                continue
             
-            all_txs.append({
+            account_txs.append({
+                'id': tx.get('id'),
                 'date': date_str,
                 'description': description,
                 'amount': amount,
@@ -199,17 +290,33 @@ def sync():
                 'details': tx.get('memo', ''),
                 'status': 'PENDING',
                 'user_notes': user_notes,
-                'raw_data': str(tx)
+                'raw_data': str(tx),
+                'ml_confidence': float(confidence),
+                'ml_category_confidence': float(pred.get('cat_confidence', 0.0)),
+                'ml_type_confidence': float(pred.get('type_confidence', 0.0)),
             })
-            
-    # 4. Save to DB
-    if all_txs:
-        df = pd.DataFrame(all_txs)
-        added_count = db.upsert_transactions(df)
-        print(f"✅ Sync Complete. Processed {len(all_txs)} transactions.")
-        print(f"📥 Added {added_count} NEW transactions to the Inbox.")
+
+        if account_txs:
+            df = pd.DataFrame(account_txs)
+            added_count = db.upsert_transactions(df)
+            account_report["inserted_count"] = added_count
+            account_report["duplicate_count"] = max(len(account_txs) - added_count, 0)
+            report["transactions_seen"] += len(account_txs)
+            report["transactions_inserted"] += added_count
+            report["duplicates"] += account_report["duplicate_count"]
+        report["accounts"].append(account_report)
+
+    # 4. Save report
+    if report["transactions_seen"]:
+        print(f"✅ Sync Complete. Processed {report['transactions_seen']} transactions.")
+        print(f"📥 Added {report['transactions_inserted']} NEW transactions to the Inbox.")
     else:
         print("No transactions found.")
+    report["status"] = "success"
+    report["finished_at"] = datetime.now().isoformat(timespec="seconds")
+    db.save_balance_snapshot(pd.DataFrame(balance_snapshot_rows), replace_for_today=True)
+    db.save_sync_report(report)
+    return report
 
 if __name__ == "__main__":
     sync()

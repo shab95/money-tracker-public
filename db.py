@@ -2,6 +2,9 @@ import sqlite3
 import pandas as pd
 import hashlib
 import os
+from datetime import datetime
+
+import config
 
 try:
     import psycopg2
@@ -11,23 +14,24 @@ except ImportError:
 
 DB_URL = None
 
-# 1. Try Streamlit Secrets (Cloud)
-try:
-    import streamlit as st
-    if hasattr(st, 'secrets'):
-         DB_URL = st.secrets.get("DB_CONNECTION_STRING") or st.secrets.get("DIRECT_CONNECTION")
-except:
-    pass
+# 1. Try Streamlit Secrets only when this app is explicitly in production mode.
+if config.should_use_production_db():
+    try:
+        import streamlit as st
+        if hasattr(st, 'secrets'):
+             DB_URL = st.secrets.get("DB_CONNECTION_STRING") or st.secrets.get("DIRECT_CONNECTION")
+    except:
+        pass
 
-# 2. Try Local Secrets (app_secrets.py)
-if not DB_URL:
+# 2. Try Local Secrets only when explicitly using production DB locally.
+if not DB_URL and config.should_use_production_db():
     try:
         import app_secrets
         DB_URL = getattr(app_secrets, 'DB_CONNECTION_STRING', None) or getattr(app_secrets, 'DIRECT_CONNECTION', None)
     except ImportError:
         pass
 
-DB_FILE = 'tracker.db'
+DB_FILE = config.get_db_file()
 
 def get_connection():
     """
@@ -106,7 +110,13 @@ def init_db():
                 raw_data TEXT,
                 account TEXT,
                 posted_date TEXT,
-                details TEXT
+                details TEXT,
+                ml_confidence REAL,
+                ml_category_confidence REAL,
+                ml_type_confidence REAL,
+                reviewed_at TEXT,
+                reviewed_by TEXT,
+                review_source TEXT
             );
         ''')
         
@@ -117,9 +127,69 @@ def init_db():
                 bank TEXT,
                 account TEXT,
                 balance REAL,
+                classification TEXT,
                 UNIQUE(date, bank, account)
             );
         ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sync_runs (
+                id SERIAL PRIMARY KEY,
+                started_at TEXT,
+                finished_at TEXT,
+                status TEXT,
+                accounts_seen INTEGER,
+                accounts_included INTEGER,
+                accounts_skipped INTEGER,
+                transactions_seen INTEGER,
+                transactions_inserted INTEGER,
+                duplicates INTEGER,
+                sync_start_date TEXT,
+                sync_end_date TEXT,
+                error TEXT
+            );
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sync_account_results (
+                id SERIAL PRIMARY KEY,
+                sync_run_id INTEGER REFERENCES sync_runs(id),
+                bank TEXT,
+                account TEXT,
+                included BOOLEAN,
+                skip_reason TEXT,
+                transaction_count INTEGER,
+                inserted_count INTEGER,
+                duplicate_count INTEGER,
+                latest_transaction_date TEXT,
+                balance REAL,
+                currency TEXT,
+                health_status TEXT,
+                error TEXT
+            );
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ml_artifacts (
+                name TEXT PRIMARY KEY,
+                artifact BYTEA,
+                trained_at TEXT,
+                metadata TEXT
+            );
+        ''')
+        _ensure_pg_column(c, "transactions", "account", "TEXT")
+        _ensure_pg_column(c, "transactions", "posted_date", "TEXT")
+        _ensure_pg_column(c, "transactions", "details", "TEXT")
+        _ensure_pg_column(c, "transactions", "ml_confidence", "REAL")
+        _ensure_pg_column(c, "transactions", "ml_category_confidence", "REAL")
+        _ensure_pg_column(c, "transactions", "ml_type_confidence", "REAL")
+        _ensure_pg_column(c, "transactions", "reviewed_at", "TEXT")
+        _ensure_pg_column(c, "transactions", "reviewed_by", "TEXT")
+        _ensure_pg_column(c, "transactions", "review_source", "TEXT")
+        _ensure_pg_column(c, "balance_history", "classification", "TEXT")
+        _ensure_pg_column(c, "sync_runs", "sync_start_date", "TEXT")
+        _ensure_pg_column(c, "sync_runs", "sync_end_date", "TEXT")
+        _ensure_pg_column(c, "sync_account_results", "latest_transaction_date", "TEXT")
+        _ensure_pg_column(c, "sync_account_results", "balance", "REAL")
+        _ensure_pg_column(c, "sync_account_results", "currency", "TEXT")
+        _ensure_pg_column(c, "sync_account_results", "health_status", "TEXT")
     else:
         # SQLite DDL
         c.execute('''
@@ -134,15 +204,28 @@ def init_db():
                 status TEXT DEFAULT 'PENDING',
                 user_notes TEXT,
                 tags TEXT,
-                raw_data TEXT
+                raw_data TEXT,
+                account TEXT,
+                posted_date TEXT,
+                details TEXT,
+                ml_confidence REAL,
+                ml_category_confidence REAL,
+                ml_type_confidence REAL,
+                reviewed_at TEXT,
+                reviewed_by TEXT,
+                review_source TEXT
             )
         ''')
-        
-        # Migration: Add 'tags' column if it doesn't exist
-        try:
-            c.execute("SELECT tags FROM transactions LIMIT 1")
-        except sqlite3.OperationalError:
-            c.execute("ALTER TABLE transactions ADD COLUMN tags TEXT")
+        _ensure_sqlite_column(c, "transactions", "tags", "TEXT")
+        _ensure_sqlite_column(c, "transactions", "account", "TEXT")
+        _ensure_sqlite_column(c, "transactions", "posted_date", "TEXT")
+        _ensure_sqlite_column(c, "transactions", "details", "TEXT")
+        _ensure_sqlite_column(c, "transactions", "ml_confidence", "REAL")
+        _ensure_sqlite_column(c, "transactions", "ml_category_confidence", "REAL")
+        _ensure_sqlite_column(c, "transactions", "ml_type_confidence", "REAL")
+        _ensure_sqlite_column(c, "transactions", "reviewed_at", "TEXT")
+        _ensure_sqlite_column(c, "transactions", "reviewed_by", "TEXT")
+        _ensure_sqlite_column(c, "transactions", "review_source", "TEXT")
 
         c.execute('''
             CREATE TABLE IF NOT EXISTS balance_history (
@@ -151,17 +234,155 @@ def init_db():
                 bank TEXT,
                 account TEXT,
                 balance REAL,
+                classification TEXT,
                 UNIQUE(date, bank, account)
+            )
+        ''')
+        _ensure_sqlite_column(c, "balance_history", "classification", "TEXT")
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                status TEXT,
+                accounts_seen INTEGER,
+                accounts_included INTEGER,
+                accounts_skipped INTEGER,
+                transactions_seen INTEGER,
+                transactions_inserted INTEGER,
+                duplicates INTEGER,
+                sync_start_date TEXT,
+                sync_end_date TEXT,
+                error TEXT
+            )
+        ''')
+        _ensure_sqlite_column(c, "sync_runs", "sync_start_date", "TEXT")
+        _ensure_sqlite_column(c, "sync_runs", "sync_end_date", "TEXT")
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sync_account_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_run_id INTEGER,
+                bank TEXT,
+                account TEXT,
+                included INTEGER,
+                skip_reason TEXT,
+                transaction_count INTEGER,
+                inserted_count INTEGER,
+                duplicate_count INTEGER,
+                latest_transaction_date TEXT,
+                balance REAL,
+                currency TEXT,
+                health_status TEXT,
+                error TEXT
+            )
+        ''')
+        _ensure_sqlite_column(c, "sync_account_results", "latest_transaction_date", "TEXT")
+        _ensure_sqlite_column(c, "sync_account_results", "balance", "REAL")
+        _ensure_sqlite_column(c, "sync_account_results", "currency", "TEXT")
+        _ensure_sqlite_column(c, "sync_account_results", "health_status", "TEXT")
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ml_artifacts (
+                name TEXT PRIMARY KEY,
+                artifact BLOB,
+                trained_at TEXT,
+                metadata TEXT
             )
         ''')
     
     conn.commit()
     conn.close()
 
+
+def _ensure_sqlite_column(cursor, table, column, column_type):
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = {row[1] for row in cursor.fetchall()}
+    if column not in columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
+def _ensure_pg_column(cursor, table, column, column_type):
+    cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
+
 def generate_id(row):
     # Create a deterministic ID to avoid duplicates
+    raw_data = row.get('raw_data', None)
+    if isinstance(raw_data, dict) and raw_data.get('id'):
+        return str(raw_data['id'])
+    if not is_blank_value(row.get('simplefin_id')):
+        return str(row['simplefin_id'])
+    return generate_legacy_id(row)
+
+
+def generate_legacy_id(row):
     raw_str = f"{row['date']}{row['amount']}{row['description']}"
     return hashlib.md5(raw_str.encode()).hexdigest()
+
+
+def is_blank_value(value):
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ""
+
+
+def clean_text(value):
+    if is_blank_value(value):
+        return ""
+    return str(value).strip()
+
+
+def get_transaction_by_id(tx_id):
+    conn = get_connection()
+    ph = '%s' if is_postgres() else '?'
+    try:
+        df = pd.read_sql_query(
+            f"SELECT id, account, method, posted_date, details FROM transactions WHERE id = {ph} LIMIT 1",
+            conn,
+            params=(tx_id,),
+        )
+        if df.empty:
+            return None
+        return df.iloc[0].to_dict()
+    finally:
+        conn.close()
+
+
+def legacy_duplicate_matches_existing(row, legacy_id):
+    existing = get_transaction_by_id(legacy_id)
+    if not existing:
+        return False
+
+    existing_account = clean_text(existing.get('account'))
+    new_account = clean_text(row.get('account'))
+    if existing_account and new_account:
+        return existing_account == new_account
+
+    existing_method = clean_text(existing.get('method'))
+    new_method = clean_text(row.get('method'))
+    if existing_method and new_method:
+        return existing_method == new_method
+
+    # Old legacy rows may have no source fields at all. In that case there is
+    # nothing safer to compare, so keep the guard that prevents reopening them.
+    return not existing_account and not existing_method
+
+def get_review_audit_values(row):
+    status = row.get('status', 'PENDING')
+    if str(status).upper() != 'REVIEWED':
+        return (
+            row.get('reviewed_at', None),
+            row.get('reviewed_by', None),
+            row.get('review_source', None),
+        )
+    return (
+        row.get('reviewed_at') or datetime.now().isoformat(timespec="seconds"),
+        row.get('reviewed_by') or 'system',
+        row.get('review_source') or 'import',
+    )
 
 def upsert_transactions(df):
     """
@@ -179,12 +400,16 @@ def upsert_transactions(df):
     
     for _, row in df.iterrows():
         # Ensure ID exists
-        if 'id' not in row or not row['id']:
+        if 'id' not in row or is_blank_value(row['id']):
             tx_id = generate_id(row)
         else:
             tx_id = row['id']
+        legacy_id = generate_legacy_id(row)
             
         try:
+            if tx_id != legacy_id and legacy_duplicate_matches_existing(row, legacy_id):
+                continue
+
             # We use INSERT OR IGNORE (SQLite) / ON CONFLICT DO NOTHING (Postgres)
             # Need strict values list
             vals = (
@@ -198,14 +423,23 @@ def upsert_transactions(df):
                 row.get('status', 'PENDING'),
                 row.get('user_notes', ''),
                 row.get('tags', ''),
-                str(row.to_dict())
+                row.get('raw_data', str(row.to_dict())),
+                row.get('account', None),
+                row.get('posted_date', None),
+                row.get('details', None),
+                row.get('ml_confidence', None),
+                row.get('ml_category_confidence', None),
+                row.get('ml_type_confidence', None),
+                *get_review_audit_values(row)
             )
 
             if is_postgres():
                 c.execute(f'''
                     INSERT INTO transactions 
-                    (id, date, amount, description, category, type, method, status, user_notes, tags, raw_data)
-                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                    (id, date, amount, description, category, type, method, status, user_notes, tags, raw_data,
+                     account, posted_date, details, ml_confidence, ml_category_confidence, ml_type_confidence,
+                     reviewed_at, reviewed_by, review_source)
+                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
                     ON CONFLICT (id) DO NOTHING
                 ''', vals)
                 # rowcount in pg is usually reliable
@@ -216,8 +450,10 @@ def upsert_transactions(df):
             else:
                 c.execute(f'''
                     INSERT OR IGNORE INTO transactions 
-                    (id, date, amount, description, category, type, method, status, user_notes, tags, raw_data)
-                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                    (id, date, amount, description, category, type, method, status, user_notes, tags, raw_data,
+                     account, posted_date, details, ml_confidence, ml_category_confidence, ml_type_confidence,
+                     reviewed_at, reviewed_by, review_source)
+                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
                 ''', vals)
                 if c.rowcount > 0:
                     count += 1
@@ -258,49 +494,93 @@ def update_transaction_status(tx_ids, new_status='REVIEWED'):
     ph = '%s' if is_postgres() else '?'
     placeholders = ','.join(ph for _ in tx_ids)
     
-    sql = f"UPDATE transactions SET status={ph} WHERE id IN ({placeholders})"
-    
-    # Params needs to be tuple/list
-    params = [new_status] + tx_ids
+    if str(new_status).upper() == 'REVIEWED':
+        sql = f'''
+            UPDATE transactions
+            SET status={ph},
+                reviewed_at=COALESCE(reviewed_at, {ph}),
+                reviewed_by=COALESCE(reviewed_by, {ph}),
+                review_source=COALESCE(review_source, {ph})
+            WHERE id IN ({placeholders})
+        '''
+        params = [new_status, datetime.now().isoformat(timespec="seconds"), 'system', 'status_update'] + tx_ids
+    else:
+        sql = f"UPDATE transactions SET status={ph} WHERE id IN ({placeholders})"
+        params = [new_status] + tx_ids
     
     c.execute(sql, params)
+    conn.commit()
+    conn.close()
+
+def review_transaction(tx_id, category, user_notes, tags, tx_type, reviewed_by='admin', review_source='manual'):
+    conn = get_connection()
+    c = conn.cursor()
+    ph = '%s' if is_postgres() else '?'
+    c.execute(f'''
+        UPDATE transactions
+        SET category = {ph},
+            user_notes = {ph},
+            tags = {ph},
+            type = {ph},
+            status = 'REVIEWED',
+            reviewed_at = {ph},
+            reviewed_by = {ph},
+            review_source = {ph}
+        WHERE id = {ph}
+    ''', (
+        category,
+        user_notes,
+        tags,
+        tx_type,
+        datetime.now().isoformat(timespec="seconds"),
+        reviewed_by,
+        review_source,
+        tx_id,
+    ))
     conn.commit()
     conn.close()
 
 # Initialize on import
 init_db()
 
-from datetime import datetime
-
-def save_balance_snapshot(balances_df):
+def save_balance_snapshot(balances_df, replace_for_today=False):
     """
     Saves a snapshot of current balances for today.
-    Overwrites if exists for today.
+    Upserts accounts present in the provided snapshot. Use replace_for_today
+    only when the caller has a full current account set.
     """
     conn = get_connection()
     c = conn.cursor()
     today = datetime.now().strftime('%Y-%m-%d')
     ph = '%s' if is_postgres() else '?'
-    
-    # Clean up existing
-    c.execute(f"DELETE FROM balance_history WHERE date = {ph}", (today,))
-    
+
+    if replace_for_today:
+        c.execute(f"DELETE FROM balance_history WHERE date = {ph}", (today,))
+
+    if balances_df.empty:
+        conn.commit()
+        conn.close()
+        return True
+
     for _, row in balances_df.iterrows():
         bank = row['Bank']
         account = row['Account']
         balance = row['Balance']
+        classification = row.get('Classification', row.get('Type', None))
         
         if is_postgres():
             c.execute(f'''
-                INSERT INTO balance_history (date, bank, account, balance)
-                VALUES ({ph}, {ph}, {ph}, {ph})
-                ON CONFLICT (date, bank, account) DO UPDATE SET balance = EXCLUDED.balance
-            ''', (today, bank, account, balance)) 
+                INSERT INTO balance_history (date, bank, account, balance, classification)
+                VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
+                ON CONFLICT (date, bank, account) DO UPDATE SET
+                    balance = EXCLUDED.balance,
+                    classification = EXCLUDED.classification
+            ''', (today, bank, account, balance, classification)) 
         else:
             c.execute(f'''
-                INSERT OR REPLACE INTO balance_history (date, bank, account, balance)
-                VALUES ({ph}, {ph}, {ph}, {ph})
-            ''', (today, bank, account, balance))
+                INSERT OR REPLACE INTO balance_history (date, bank, account, balance, classification)
+                VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
+            ''', (today, bank, account, balance, classification))
 
     conn.commit()
     conn.close()
@@ -328,3 +608,207 @@ def get_balance_history_details():
     df = pd.read_sql_query('SELECT * FROM balance_history', conn)
     conn.close()
     return df
+
+
+def get_latest_balance_snapshot():
+    conn = get_connection()
+    ph = '%s' if is_postgres() else '?'
+    try:
+        latest_sync = pd.read_sql_query('''
+            SELECT finished_at, started_at
+            FROM sync_runs
+            WHERE status = 'success'
+            ORDER BY id DESC
+            LIMIT 1
+        ''', conn)
+
+        if not latest_sync.empty:
+            sync_time = latest_sync.iloc[0]["finished_at"] or latest_sync.iloc[0]["started_at"]
+            sync_date = pd.to_datetime(sync_time).strftime("%Y-%m-%d")
+            return pd.read_sql_query(f'''
+                SELECT date, bank, account, balance, classification
+                FROM balance_history
+                WHERE date = {ph}
+                ORDER BY classification, bank, account
+            ''', conn, params=(sync_date,))
+
+        return pd.read_sql_query('''
+            SELECT date, bank, account, balance, classification
+            FROM balance_history
+            WHERE date = (SELECT MAX(date) FROM balance_history)
+            ORDER BY classification, bank, account
+        ''', conn)
+    finally:
+        conn.close()
+
+
+def get_balance_freshness(as_of_date=None):
+    history = get_balance_history_details()
+    if history.empty:
+        return pd.DataFrame(columns=[
+            "bank", "account", "balance_unchanged_since", "days_balance_unchanged"
+        ])
+
+    history = history.copy()
+    history["date"] = pd.to_datetime(history["date"])
+    if as_of_date is None:
+        as_of = history["date"].max()
+    else:
+        as_of = pd.to_datetime(as_of_date)
+
+    rows = []
+    for (bank, account), group in history.sort_values("date").groupby(["bank", "account"]):
+        group = group.sort_values("date")
+        latest = group.iloc[-1]
+        latest_balance = latest["balance"]
+        unchanged_since = latest["date"]
+
+        for _, row in group.iloc[:-1][::-1].iterrows():
+            if row["balance"] != latest_balance:
+                break
+            unchanged_since = row["date"]
+
+        rows.append({
+            "bank": bank,
+            "account": account,
+            "balance_unchanged_since": unchanged_since.strftime("%Y-%m-%d"),
+            "days_balance_unchanged": int((as_of - unchanged_since).days),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def save_sync_report(report):
+    conn = get_connection()
+    c = conn.cursor()
+    ph = '%s' if is_postgres() else '?'
+    account_results = report.get('accounts', [])
+    accounts_included = sum(1 for item in account_results if item.get('included'))
+    accounts_skipped = sum(1 for item in account_results if not item.get('included'))
+    values = (
+        report.get('started_at'),
+        report.get('finished_at'),
+        report.get('status'),
+        len(account_results),
+        accounts_included,
+        accounts_skipped,
+        report.get('transactions_seen', 0),
+        report.get('transactions_inserted', 0),
+        report.get('duplicates', 0),
+        report.get('sync_start_date'),
+        report.get('sync_end_date'),
+        report.get('error', '')
+    )
+    if is_postgres():
+        c.execute(f'''
+            INSERT INTO sync_runs
+            (started_at, finished_at, status, accounts_seen, accounts_included, accounts_skipped,
+             transactions_seen, transactions_inserted, duplicates, sync_start_date, sync_end_date, error)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            RETURNING id
+        ''', values)
+        sync_run_id = c.fetchone()[0]
+    else:
+        c.execute(f'''
+            INSERT INTO sync_runs
+            (started_at, finished_at, status, accounts_seen, accounts_included, accounts_skipped,
+             transactions_seen, transactions_inserted, duplicates, sync_start_date, sync_end_date, error)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+        ''', values)
+        sync_run_id = c.lastrowid
+
+    for item in account_results:
+        c.execute(f'''
+            INSERT INTO sync_account_results
+            (sync_run_id, bank, account, included, skip_reason, transaction_count,
+             inserted_count, duplicate_count, latest_transaction_date, balance, currency,
+             health_status, error)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+        ''', (
+            sync_run_id,
+            item.get('bank'),
+            item.get('account'),
+            bool(item.get('included')),
+            item.get('skip_reason', ''),
+            item.get('transaction_count', 0),
+            item.get('inserted_count', 0),
+            item.get('duplicate_count', 0),
+            item.get('latest_transaction_date', ''),
+            item.get('balance', None),
+            item.get('currency', ''),
+            item.get('health_status', ''),
+            item.get('error', '')
+        ))
+
+    conn.commit()
+    conn.close()
+    return sync_run_id
+
+
+def get_latest_sync_account_results():
+    conn = get_connection()
+    latest = pd.read_sql_query('''
+        SELECT id, started_at, finished_at, status, accounts_seen, accounts_included,
+               accounts_skipped, transactions_seen, transactions_inserted, duplicates,
+               sync_start_date, sync_end_date, error
+        FROM sync_runs
+        ORDER BY id DESC
+        LIMIT 1
+    ''', conn)
+    if latest.empty:
+        conn.close()
+        return latest, pd.DataFrame()
+    run_id = int(latest.iloc[0]['id'])
+    accounts = pd.read_sql_query(f'''
+        SELECT bank, account, included, skip_reason, transaction_count, inserted_count,
+               duplicate_count, latest_transaction_date, balance, currency, health_status, error
+        FROM sync_account_results
+        WHERE sync_run_id = {run_id}
+        ORDER BY included DESC, bank, account
+    ''', conn)
+    conn.close()
+    return latest, accounts
+
+
+def save_ml_artifact(name, artifact_bytes, metadata):
+    import json
+
+    conn = get_connection()
+    c = conn.cursor()
+    ph = '%s' if is_postgres() else '?'
+    trained_at = datetime.now().isoformat(timespec='seconds')
+    metadata_json = json.dumps(metadata, default=str)
+    if is_postgres():
+        c.execute(f'''
+            INSERT INTO ml_artifacts (name, artifact, trained_at, metadata)
+            VALUES ({ph}, {ph}, {ph}, {ph})
+            ON CONFLICT (name) DO UPDATE SET
+                artifact = EXCLUDED.artifact,
+                trained_at = EXCLUDED.trained_at,
+                metadata = EXCLUDED.metadata
+        ''', (name, psycopg2.Binary(artifact_bytes), trained_at, metadata_json))
+    else:
+        c.execute(f'''
+            INSERT OR REPLACE INTO ml_artifacts (name, artifact, trained_at, metadata)
+            VALUES ({ph}, {ph}, {ph}, {ph})
+        ''', (name, artifact_bytes, trained_at, metadata_json))
+    conn.commit()
+    conn.close()
+    return trained_at
+
+
+def load_ml_artifact(name):
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT artifact, trained_at, metadata FROM ml_artifacts WHERE name = %s" if is_postgres() else "SELECT artifact, trained_at, metadata FROM ml_artifacts WHERE name = ?", conn, params=(name,))
+    conn.close()
+    if df.empty:
+        return None
+    row = df.iloc[0]
+    artifact = row['artifact']
+    if isinstance(artifact, memoryview):
+        artifact = artifact.tobytes()
+    return {
+        'artifact': artifact,
+        'trained_at': row['trained_at'],
+        'metadata': row['metadata']
+    }
