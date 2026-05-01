@@ -304,6 +304,31 @@ def _ensure_sqlite_column(cursor, table, column, column_type):
 def _ensure_pg_column(cursor, table, column, column_type):
     cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
 
+
+def ensure_ml_artifacts_table():
+    conn = get_connection()
+    c = conn.cursor()
+    if is_postgres():
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ml_artifacts (
+                name TEXT PRIMARY KEY,
+                artifact BYTEA,
+                trained_at TEXT,
+                metadata TEXT
+            );
+        ''')
+    else:
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ml_artifacts (
+                name TEXT PRIMARY KEY,
+                artifact BLOB,
+                trained_at TEXT,
+                metadata TEXT
+            )
+        ''')
+    conn.commit()
+    conn.close()
+
 def generate_id(row):
     # Create a deterministic ID to avoid duplicates
     raw_data = row.get('raw_data', None)
@@ -834,6 +859,7 @@ def get_latest_sync_account_results():
 def save_ml_artifact(name, artifact_bytes, metadata):
     import json
 
+    ensure_ml_artifacts_table()
     conn = get_connection()
     c = conn.cursor()
     ph = '%s' if is_postgres() else '?'
@@ -859,6 +885,7 @@ def save_ml_artifact(name, artifact_bytes, metadata):
 
 
 def load_ml_artifact(name):
+    ensure_ml_artifacts_table()
     conn = get_connection()
     df = pd.read_sql_query("SELECT artifact, trained_at, metadata FROM ml_artifacts WHERE name = %s" if is_postgres() else "SELECT artifact, trained_at, metadata FROM ml_artifacts WHERE name = ?", conn, params=(name,))
     conn.close()

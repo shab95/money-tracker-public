@@ -272,7 +272,9 @@ def sync():
             # Add "🤖" to notes if confidence is low? 
             # Or just log it. Let's add it to user_notes if uncertain.
             user_notes = ""
-            if confidence < 0.6:
+            if not pred.get('model_available'):
+                user_notes = "ML model not trained"
+            elif confidence < 0.6:
                 user_notes = f"🤖 Low Confidence ({int(confidence*100)}%)"
 
             date_str = transaction_date_from_timestamp(tx.get('posted'))
