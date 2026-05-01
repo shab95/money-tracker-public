@@ -104,6 +104,47 @@ def test_simplefin_id_does_not_duplicate_legacy_hash_row(monkeypatch, tmp_path):
     assert len(db.get_all_transactions()) == 1
 
 
+def test_simplefin_id_does_not_duplicate_legacy_hash_row_with_amount_format_drift(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    conn = db.get_connection()
+    legacy_id = db.generate_legacy_id({
+        "date": "2026-01-30",
+        "amount": "4.90",
+        "description": "OLD PAYMENT",
+    })
+    conn.execute("""
+        INSERT INTO transactions
+            (id, date, amount, description, category, type, method, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        legacy_id,
+        "2026-01-30",
+        4.90,
+        "OLD PAYMENT",
+        "Restaurants",
+        "Expense",
+        "Capital One - 360 Checking (3285)",
+        "REVIEWED",
+    ))
+    conn.commit()
+    conn.close()
+
+    simplefin_row = {
+        "id": "TRN-old-payment",
+        "date": "2026-01-30",
+        "amount": 4.9,
+        "description": "OLD PAYMENT",
+        "category": "Uncategorized",
+        "type": "Expense",
+        "method": "Capital One - 360 Checking (3285)",
+        "account": "360 Checking (3285)",
+        "posted_date": "2026-01-30",
+        "raw_data": "{'id': 'TRN-old-payment'}",
+    }
+    assert db.upsert_transactions(pd.DataFrame([simplefin_row])) == 0
+    assert len(db.get_all_transactions()) == 1
+
+
 def test_simplefin_legacy_guard_allows_same_charge_on_different_account(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     legacy_row = {

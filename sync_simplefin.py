@@ -91,9 +91,12 @@ def get_sync_date_range(now=None):
     configured_start = os.getenv("MONEY_TRACKER_SIMPLEFIN_START_DATE", "").strip()
     if configured_start:
         return configured_start, end_date
-    if config.is_production_env():
-        return '2025-12-01', end_date
-    lookback_days = int(os.getenv("MONEY_TRACKER_LOCAL_SYNC_DAYS", "30"))
+    lookback_days = int(
+        os.getenv(
+            "MONEY_TRACKER_SYNC_DAYS",
+            os.getenv("MONEY_TRACKER_LOCAL_SYNC_DAYS", "30"),
+        )
+    )
     return (now - timedelta(days=lookback_days)).strftime('%Y-%m-%d'), end_date
 
 

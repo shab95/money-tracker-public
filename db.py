@@ -318,6 +318,33 @@ def generate_legacy_id(row):
     return hashlib.md5(raw_str.encode()).hexdigest()
 
 
+def generate_legacy_id_candidates(row):
+    """
+    Older rows used date + amount + description as the primary key. Pandas and
+    database drivers can stringify the same amount differently (4.9 vs 4.90),
+    so check the common historical shapes before treating a SimpleFIN ID as new.
+    """
+    date_value = row['date']
+    description = row['description']
+    amount_value = row['amount']
+    amount_strings = {str(amount_value)}
+    try:
+        amount_float = float(amount_value)
+        amount_strings.add(str(amount_float))
+        amount_strings.add(f"{amount_float:.2f}")
+        amount_strings.add(str(abs(amount_float)))
+        amount_strings.add(f"{abs(amount_float):.2f}")
+        if amount_float.is_integer():
+            amount_strings.add(str(int(amount_float)))
+    except (TypeError, ValueError):
+        pass
+
+    return [
+        hashlib.md5(f"{date_value}{amount}{description}".encode()).hexdigest()
+        for amount in sorted(amount_strings)
+    ]
+
+
 def is_blank_value(value):
     if value is None:
         return True
@@ -351,24 +378,50 @@ def get_transaction_by_id(tx_id):
         conn.close()
 
 
-def legacy_duplicate_matches_existing(row, legacy_id):
-    existing = get_transaction_by_id(legacy_id)
-    if not existing:
+def get_transactions_by_ids(tx_ids):
+    tx_ids = list(dict.fromkeys(tx_ids))
+    if not tx_ids:
+        return []
+    conn = get_connection()
+    ph = '%s' if is_postgres() else '?'
+    placeholders = ','.join(ph for _ in tx_ids)
+    try:
+        df = pd.read_sql_query(
+            f"SELECT id, account, method, posted_date, details FROM transactions WHERE id IN ({placeholders})",
+            conn,
+            params=tx_ids,
+        )
+        return df.to_dict('records')
+    finally:
+        conn.close()
+
+
+def legacy_duplicate_matches_existing(row, legacy_ids):
+    existing_rows = get_transactions_by_ids(legacy_ids)
+    if not existing_rows:
         return False
 
-    existing_account = clean_text(existing.get('account'))
-    new_account = clean_text(row.get('account'))
-    if existing_account and new_account:
-        return existing_account == new_account
+    for existing in existing_rows:
+        existing_account = clean_text(existing.get('account'))
+        new_account = clean_text(row.get('account'))
+        if existing_account and new_account:
+            if existing_account == new_account:
+                return True
+            continue
 
-    existing_method = clean_text(existing.get('method'))
-    new_method = clean_text(row.get('method'))
-    if existing_method and new_method:
-        return existing_method == new_method
+        existing_method = clean_text(existing.get('method'))
+        new_method = clean_text(row.get('method'))
+        if existing_method and new_method:
+            if existing_method == new_method:
+                return True
+            continue
 
-    # Old legacy rows may have no source fields at all. In that case there is
-    # nothing safer to compare, so keep the guard that prevents reopening them.
-    return not existing_account and not existing_method
+        # Old legacy rows may have no source fields at all. In that case there is
+        # nothing safer to compare, so keep the guard that prevents reopening them.
+        if not existing_account and not existing_method:
+            return True
+
+    return False
 
 def get_review_audit_values(row):
     status = row.get('status', 'PENDING')
@@ -404,10 +457,10 @@ def upsert_transactions(df):
             tx_id = generate_id(row)
         else:
             tx_id = row['id']
-        legacy_id = generate_legacy_id(row)
+        legacy_ids = generate_legacy_id_candidates(row)
             
         try:
-            if tx_id != legacy_id and legacy_duplicate_matches_existing(row, legacy_id):
+            if tx_id not in legacy_ids and legacy_duplicate_matches_existing(row, legacy_ids):
                 continue
 
             # We use INSERT OR IGNORE (SQLite) / ON CONFLICT DO NOTHING (Postgres)
