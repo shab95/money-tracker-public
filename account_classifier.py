@@ -56,6 +56,10 @@ def normalize_account_name(value):
 def classify_account(bank, account, balance=0.0):
     text = f"{bank or ''} {account or ''}".lower()
     normalized = normalize_account_name(account)
+    bank_text = (bank or "").lower()
+
+    if "fidelity" in bank_text and normalized == "self-directed brokerage":
+        return RETIREMENT_RESTRICTED
 
     if any(keyword in text for keyword in RETIREMENT_KEYWORDS):
         return RETIREMENT_RESTRICTED
@@ -74,6 +78,10 @@ def classify_account(bank, account, balance=0.0):
 
 def should_sync_transactions(bank, account):
     text = f"{bank or ''} {account or ''}".lower()
+    normalized = normalize_account_name(account)
+    bank_text = (bank or "").lower()
+    if "fidelity" in bank_text and normalized == "self-directed brokerage":
+        return False, "retirement_or_restricted_account"
     if any(keyword in text for keyword in RETIREMENT_KEYWORDS):
         return False, "retirement_or_restricted_account"
     if any(keyword in text for keyword in TAXABLE_INVESTMENT_KEYWORDS):

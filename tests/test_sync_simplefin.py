@@ -226,7 +226,7 @@ def test_balance_snapshot_skips_duplicate_fidelity_401k():
         "Bank": "Fidelity Investments",
         "Account": "Self-Directed Brokerage (3743)",
         "Balance": 20.0,
-        "Classification": "Taxable Investments",
+        "Classification": "Retirement / Restricted",
     }]
 
 
