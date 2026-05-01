@@ -249,7 +249,9 @@ class TransactionClassifier:
             'type': 'Expense' if signed_amount < 0 else 'Income', # Default fallback
             'confidence': 0.0,
             'cat_confidence': 0.0,
-            'type_confidence': 0.0
+            'type_confidence': 0.0,
+            'model_available': bool(self.cat_model or self.type_model),
+            'prediction_source': 'model' if (self.cat_model or self.type_model) else 'fallback_untrained',
         }
         
         # 1. Predict Type

@@ -11,6 +11,21 @@ class FakeClassifier:
             "confidence": 0.7,
             "cat_confidence": 0.7,
             "type_confidence": 0.9,
+            "model_available": True,
+            "prediction_source": "model",
+        }
+
+
+class UntrainedClassifier:
+    def predict(self, description, signed_amount):
+        return {
+            "category": "Uncategorized",
+            "type": "Expense" if signed_amount < 0 else "Income",
+            "confidence": 0.0,
+            "cat_confidence": 0.0,
+            "type_confidence": 0.0,
+            "model_available": False,
+            "prediction_source": "fallback_untrained",
         }
 
 
@@ -69,6 +84,36 @@ def test_sync_report_includes_and_skips_accounts(monkeypatch, tmp_path):
     roth = history[history["account"] == "Robinhood Roth IRA (0799)"].iloc[0]
     assert roth["balance"] == 2500.0
     assert roth["classification"] == "Retirement / Restricted"
+
+
+def test_sync_notes_untrained_model_without_low_confidence_percent(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    import sync_simplefin
+
+    monkeypatch.setattr(sync_simplefin, "db", db)
+    monkeypatch.setattr(sync_simplefin, "SIMPLEFIN_ACCESS_URL", "https://example.test")
+    monkeypatch.setattr(sync_simplefin.ml_utils, "classifier", UntrainedClassifier())
+    monkeypatch.setattr(sync_simplefin, "fetch_data", lambda *_args, **_kwargs: {
+        "accounts": [{
+            "org": {"name": "Capital One"},
+            "name": "360 Checking (3285)",
+            "balance": "1000.25",
+            "currency": "USD",
+            "transactions": [{
+                "id": "sf-untrained",
+                "posted": 1777377600,
+                "amount": "-12.34",
+                "description": "COFFEE",
+                "memo": "",
+            }],
+        }]
+    })
+
+    sync_simplefin.sync()
+
+    saved = db.get_all_transactions().iloc[0]
+    assert saved["user_notes"] == "ML model not trained"
+    assert saved["ml_confidence"] == 0.0
 
 
 def test_sync_replaces_today_balance_snapshot(monkeypatch, tmp_path):

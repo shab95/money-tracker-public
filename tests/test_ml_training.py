@@ -54,3 +54,16 @@ def test_training_uses_reviewed_rows(monkeypatch, tmp_path):
     assert report["status"] == "success"
     assert report["reviewed_samples"] == 12
     assert report["category_model"] == "trained"
+
+
+def test_untrained_prediction_reports_fallback_source(monkeypatch, tmp_path):
+    ml_utils = reload_ml(monkeypatch, tmp_path)
+    ml_utils.classifier.cat_model = None
+    ml_utils.classifier.type_model = None
+
+    pred = ml_utils.classifier.predict("COFFEE", -4.95)
+
+    assert pred["model_available"] is False
+    assert pred["prediction_source"] == "fallback_untrained"
+    assert pred["confidence"] == 0.0
+    assert pred["type"] == "Expense"
