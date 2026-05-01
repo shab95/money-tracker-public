@@ -215,11 +215,23 @@ def test_local_sync_window_defaults_to_recent(monkeypatch):
     assert end_date == "2026-04-29"
 
 
-def test_production_sync_window_keeps_backfill_start(monkeypatch):
+def test_production_sync_window_defaults_to_recent(monkeypatch):
     import sync_simplefin
 
     monkeypatch.setenv("MONEY_TRACKER_ENV", "production")
     monkeypatch.delenv("MONEY_TRACKER_SIMPLEFIN_START_DATE", raising=False)
+    monkeypatch.delenv("MONEY_TRACKER_SYNC_DAYS", raising=False)
+
+    start_date, end_date = sync_simplefin.get_sync_date_range(datetime(2026, 4, 29))
+    assert start_date == "2026-03-30"
+    assert end_date == "2026-04-29"
+
+
+def test_sync_window_can_be_explicitly_backfilled(monkeypatch):
+    import sync_simplefin
+
+    monkeypatch.setenv("MONEY_TRACKER_ENV", "production")
+    monkeypatch.setenv("MONEY_TRACKER_SIMPLEFIN_START_DATE", "2025-12-01")
 
     start_date, end_date = sync_simplefin.get_sync_date_range(datetime(2026, 4, 29))
     assert start_date == "2025-12-01"

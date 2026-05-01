@@ -180,14 +180,15 @@ Open:
 http://localhost:8501
 ```
 
-Local SimpleFIN sync defaults to a recent 30-day transaction window so a fresh
-SQLite DB does not reopen months of already-reviewed transactions. Override it
-with:
+SimpleFIN sync defaults to a recent 30-day transaction window so the app does
+not reopen months of already-reviewed transactions. Override it with:
 
 ```bash
-MONEY_TRACKER_LOCAL_SYNC_DAYS=90 ./venv/bin/streamlit run app.py
+MONEY_TRACKER_SYNC_DAYS=90 ./venv/bin/streamlit run app.py
 MONEY_TRACKER_SIMPLEFIN_START_DATE=2025-12-01 ./venv/bin/streamlit run app.py
 ```
+
+Use `MONEY_TRACKER_SIMPLEFIN_START_DATE` only for intentional backfills.
 
 ## QA With Production-Like Data
 
