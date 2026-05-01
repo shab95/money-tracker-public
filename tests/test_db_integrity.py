@@ -145,6 +145,36 @@ def test_simplefin_id_does_not_duplicate_legacy_hash_row_with_amount_format_drif
     assert len(db.get_all_transactions()) == 1
 
 
+def test_simplefin_legacy_guard_matches_masked_account_suffix(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    legacy_row = {
+        "date": "2026-02-03",
+        "amount": 500.00,
+        "description": "ATM",
+        "category": "Misc Expense",
+        "type": "Expense",
+        "method": "Capital One - 360 Checking",
+        "account": "360 Checking",
+        "status": "REVIEWED",
+    }
+    db.upsert_transactions(pd.DataFrame([legacy_row]))
+
+    simplefin_row = {
+        **legacy_row,
+        "id": "TRN-with-masked-suffix",
+        "method": "Capital One - 360 Checking (3285)",
+        "account": "360 Checking (3285)",
+        "status": "PENDING",
+        "posted_date": "2026-02-03",
+        "raw_data": "{'id': 'TRN-with-masked-suffix'}",
+    }
+
+    assert db.upsert_transactions(pd.DataFrame([simplefin_row])) == 0
+    saved = db.get_all_transactions()
+    assert len(saved) == 1
+    assert saved.iloc[0]["status"] == "REVIEWED"
+
+
 def test_simplefin_legacy_guard_allows_same_charge_on_different_account(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     legacy_row = {

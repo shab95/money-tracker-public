@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 import hashlib
 import os
+import re
 from datetime import datetime
 
 import config
@@ -362,6 +363,13 @@ def clean_text(value):
     return str(value).strip()
 
 
+def normalize_source_text(value):
+    text = clean_text(value)
+    # SimpleFIN commonly appends a masked account suffix, e.g. "360 Checking
+    # (3285)"; older reviewed rows may only have "360 Checking".
+    return re.sub(r"\s+\(\d{2,}\)$", "", text).strip()
+
+
 def get_transaction_by_id(tx_id):
     conn = get_connection()
     ph = '%s' if is_postgres() else '?'
@@ -402,15 +410,15 @@ def legacy_duplicate_matches_existing(row, legacy_ids):
         return False
 
     for existing in existing_rows:
-        existing_account = clean_text(existing.get('account'))
-        new_account = clean_text(row.get('account'))
+        existing_account = normalize_source_text(existing.get('account'))
+        new_account = normalize_source_text(row.get('account'))
         if existing_account and new_account:
             if existing_account == new_account:
                 return True
             continue
 
-        existing_method = clean_text(existing.get('method'))
-        new_method = clean_text(row.get('method'))
+        existing_method = normalize_source_text(existing.get('method'))
+        new_method = normalize_source_text(row.get('method'))
         if existing_method and new_method:
             if existing_method == new_method:
                 return True
