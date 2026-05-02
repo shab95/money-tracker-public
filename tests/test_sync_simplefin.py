@@ -215,6 +215,9 @@ def test_empty_sync_does_not_fall_back_to_previous_balance_snapshot(monkeypatch,
     assert context["latest_sync_returned_no_balances"] is True
     assert context["balance_accounts_seen"] == 0
     assert context["balances"].empty
+    snapshot_run = db.get_latest_balance_snapshot_run()
+    assert snapshot_run.iloc[0]["account_count"] == 0
+    assert pd.notna(snapshot_run.iloc[0]["sync_run_id"])
     history = db.get_balance_history_details()
     assert set(history["account"]) == {"Closed Account"}
 
