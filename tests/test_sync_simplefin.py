@@ -116,6 +116,45 @@ def test_sync_notes_untrained_model_without_low_confidence_percent(monkeypatch, 
     assert saved["ml_confidence"] == 0.0
 
 
+def test_account_rules_control_sync_and_balance_snapshot(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    import sync_simplefin
+
+    db.upsert_account_rules([{
+        "bank": "Capital One",
+        "account": "360 Checking (3285)",
+        "classification": "Retirement / Restricted",
+        "include_in_inbox": False,
+        "include_in_net_worth": False,
+    }])
+    monkeypatch.setattr(sync_simplefin, "db", db)
+    monkeypatch.setattr(sync_simplefin, "SIMPLEFIN_ACCESS_URL", "https://example.test")
+    monkeypatch.setattr(sync_simplefin.ml_utils, "classifier", FakeClassifier())
+    monkeypatch.setattr(sync_simplefin, "fetch_data", lambda *_args, **_kwargs: {
+        "accounts": [{
+            "org": {"name": "Capital One"},
+            "name": "360 Checking (3285)",
+            "balance": "1000.25",
+            "currency": "USD",
+            "transactions": [{
+                "id": "sf-rule",
+                "posted": 1777377600,
+                "amount": "-12.34",
+                "description": "COFFEE",
+                "memo": "",
+            }],
+        }]
+    })
+
+    report = sync_simplefin.sync()
+
+    assert report["balance_accounts_seen"] == 0
+    assert report["transactions_inserted"] == 0
+    assert report["accounts"][0]["included"] is False
+    assert report["accounts"][0]["skip_reason"] == "account_rule_excluded_from_inbox"
+    assert db.get_balance_history_details().empty
+
+
 def test_sync_replaces_today_balance_snapshot(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     import sync_simplefin

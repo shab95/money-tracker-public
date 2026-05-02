@@ -18,6 +18,9 @@ def has_balance(value):
 
 
 def used_in_net_worth(row):
+    include_override = account_classifier.optional_bool(row.get("include_in_net_worth"))
+    if include_override is False:
+        return False
     return not is_duplicate_connection(row.get("skip_reason")) and has_balance(row.get("balance"))
 
 
@@ -49,6 +52,23 @@ def balance_status_label(row):
     if bool(row.get("possibly_stale")):
         return "Possibly stale"
     return "Balance returned"
+
+
+def rule_option_to_bool(value):
+    if value == "Include":
+        return True
+    if value == "Exclude":
+        return False
+    return None
+
+
+def bool_to_rule_option(value):
+    optional = account_classifier.optional_bool(value)
+    if optional is True:
+        return "Include"
+    if optional is False:
+        return "Exclude"
+    return "Default"
 
 
 def render_bank_sync_button(key="sync_with_banks"):
@@ -642,6 +662,8 @@ with tab2:
             st.info("No sync runs recorded yet.")
         else:
             run = latest_run.iloc[0]
+            account_rules = db.get_account_rules()
+            rules_map = account_classifier.rules_to_map(account_rules)
             st.caption(
                 f"Last sync: {run['status']} at {run['finished_at']} | "
                 f"{run['transactions_inserted']} new, {run['duplicates']} duplicates | "
@@ -653,6 +675,13 @@ with tab2:
             if not account_results.empty:
                 display_sync = account_results.copy()
                 display_sync['included'] = display_sync['included'].astype(bool)
+                display_sync["rule"] = display_sync.apply(
+                    lambda row: account_classifier.get_account_rule(rules_map, row["bank"], row["account"]),
+                    axis=1,
+                )
+                display_sync["include_in_net_worth"] = display_sync["rule"].map(
+                    lambda rule: (rule or {}).get("include_in_net_worth")
+                )
                 display_sync["Used in Inbox"] = display_sync["included"].map(lambda value: "Yes" if value else "No")
                 display_sync["Used in Net Worth"] = display_sync.apply(
                     lambda row: "Yes" if used_in_net_worth(row) else "No",
@@ -669,7 +698,12 @@ with tab2:
                     display_sync["balance_unchanged_since"] = ""
                     display_sync["days_balance_unchanged"] = 0
                 display_sync["Classification"] = display_sync.apply(
-                    lambda row: account_classifier.classify_account(row["bank"], row["account"], row.get("balance")),
+                    lambda row: account_classifier.classify_account(
+                        row["bank"],
+                        row["account"],
+                        row.get("balance"),
+                        rule=row.get("rule"),
+                    ),
                     axis=1,
                 )
                 stale_classes = {
@@ -730,6 +764,71 @@ with tab2:
                     "Days Unchanged", "Action", "New", "Duplicates", "Error"
                 ]]
                 st.dataframe(visible_sync, use_container_width=True, hide_index=True)
+
+                if ROLE == 'admin':
+                    with st.expander("Account Rules"):
+                        st.caption("Overrides apply on the next bank sync and Net Worth snapshot.")
+                        known_accounts = display_sync[["bank", "account", "Classification", "rule"]].copy()
+                        known_accounts["Classification Override"] = known_accounts["rule"].map(
+                            lambda rule: (rule or {}).get("classification") or "Default"
+                        )
+                        known_accounts["Inbox Override"] = known_accounts["rule"].map(
+                            lambda rule: bool_to_rule_option((rule or {}).get("include_in_inbox"))
+                        )
+                        known_accounts["Net Worth Override"] = known_accounts["rule"].map(
+                            lambda rule: bool_to_rule_option((rule or {}).get("include_in_net_worth"))
+                        )
+                        known_accounts["Notes"] = known_accounts["rule"].map(
+                            lambda rule: (rule or {}).get("notes") or ""
+                        )
+                        rules_editor = known_accounts.rename(columns={
+                            "bank": "Bank",
+                            "account": "Account",
+                            "Classification": "Current Classification",
+                        })[[
+                            "Bank", "Account", "Current Classification",
+                            "Classification Override", "Inbox Override",
+                            "Net Worth Override", "Notes"
+                        ]]
+                        edited_rules = st.data_editor(
+                            rules_editor,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "Bank": st.column_config.TextColumn("Bank", disabled=True),
+                                "Account": st.column_config.TextColumn("Account", disabled=True),
+                                "Current Classification": st.column_config.TextColumn("Current Classification", disabled=True),
+                                "Classification Override": st.column_config.SelectboxColumn(
+                                    "Classification Override",
+                                    options=["Default", *account_classifier.ACCOUNT_CLASSIFICATIONS],
+                                ),
+                                "Inbox Override": st.column_config.SelectboxColumn(
+                                    "Inbox Override",
+                                    options=["Default", "Include", "Exclude"],
+                                ),
+                                "Net Worth Override": st.column_config.SelectboxColumn(
+                                    "Net Worth Override",
+                                    options=["Default", "Include", "Exclude"],
+                                ),
+                                "Notes": st.column_config.TextColumn("Notes"),
+                            },
+                            key="account_rules_editor",
+                        )
+                        if st.button("Save Account Rules"):
+                            records = []
+                            for _, row in edited_rules.iterrows():
+                                classification = row["Classification Override"]
+                                records.append({
+                                    "bank": row["Bank"],
+                                    "account": row["Account"],
+                                    "classification": None if classification == "Default" else classification,
+                                    "include_in_inbox": rule_option_to_bool(row["Inbox Override"]),
+                                    "include_in_net_worth": rule_option_to_bool(row["Net Worth Override"]),
+                                    "notes": row.get("Notes", ""),
+                                })
+                            saved_count = db.upsert_account_rules(records)
+                            st.success(f"Saved {saved_count} account rules. Sync with Banks to apply them.")
+                            st.rerun()
     except Exception as e:
         st.caption(f"Connection status unavailable: {e}")
 

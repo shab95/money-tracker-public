@@ -176,6 +176,19 @@ def init_db():
                 metadata TEXT
             );
         ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS account_rules (
+                id SERIAL PRIMARY KEY,
+                bank TEXT,
+                account TEXT,
+                classification TEXT,
+                include_in_inbox BOOLEAN,
+                include_in_net_worth BOOLEAN,
+                notes TEXT,
+                updated_at TEXT,
+                UNIQUE(bank, account)
+            );
+        ''')
         _ensure_pg_column(c, "transactions", "account", "TEXT")
         _ensure_pg_column(c, "transactions", "posted_date", "TEXT")
         _ensure_pg_column(c, "transactions", "details", "TEXT")
@@ -193,6 +206,11 @@ def init_db():
         _ensure_pg_column(c, "sync_account_results", "balance", "REAL")
         _ensure_pg_column(c, "sync_account_results", "currency", "TEXT")
         _ensure_pg_column(c, "sync_account_results", "health_status", "TEXT")
+        _ensure_pg_column(c, "account_rules", "classification", "TEXT")
+        _ensure_pg_column(c, "account_rules", "include_in_inbox", "BOOLEAN")
+        _ensure_pg_column(c, "account_rules", "include_in_net_worth", "BOOLEAN")
+        _ensure_pg_column(c, "account_rules", "notes", "TEXT")
+        _ensure_pg_column(c, "account_rules", "updated_at", "TEXT")
     else:
         # SQLite DDL
         c.execute('''
@@ -293,6 +311,24 @@ def init_db():
                 metadata TEXT
             )
         ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS account_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bank TEXT,
+                account TEXT,
+                classification TEXT,
+                include_in_inbox INTEGER,
+                include_in_net_worth INTEGER,
+                notes TEXT,
+                updated_at TEXT,
+                UNIQUE(bank, account)
+            )
+        ''')
+        _ensure_sqlite_column(c, "account_rules", "classification", "TEXT")
+        _ensure_sqlite_column(c, "account_rules", "include_in_inbox", "INTEGER")
+        _ensure_sqlite_column(c, "account_rules", "include_in_net_worth", "INTEGER")
+        _ensure_sqlite_column(c, "account_rules", "notes", "TEXT")
+        _ensure_sqlite_column(c, "account_rules", "updated_at", "TEXT")
     
     conn.commit()
     conn.close()
@@ -332,6 +368,95 @@ def ensure_ml_artifacts_table():
         ''')
     conn.commit()
     conn.close()
+
+
+def get_account_rules():
+    conn = get_connection()
+    try:
+        return pd.read_sql_query('''
+            SELECT bank, account, classification, include_in_inbox,
+                   include_in_net_worth, notes, updated_at
+            FROM account_rules
+            ORDER BY bank, account
+        ''', conn)
+    finally:
+        conn.close()
+
+
+def _coerce_rule_bool(value):
+    if value is None or value == "":
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "include", "1"}:
+            return True
+        if lowered in {"false", "no", "exclude", "0"}:
+            return False
+        return None
+    return bool(value)
+
+
+def upsert_account_rules(rules):
+    if not rules:
+        return 0
+    conn = get_connection()
+    c = conn.cursor()
+    ph = '%s' if is_postgres() else '?'
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    count = 0
+    for rule in rules:
+        bank = clean_text(rule.get("bank"))
+        account = clean_text(rule.get("account"))
+        if not bank or not account:
+            continue
+        classification = clean_text(rule.get("classification")) or None
+        include_in_inbox = _coerce_rule_bool(rule.get("include_in_inbox"))
+        include_in_net_worth = _coerce_rule_bool(rule.get("include_in_net_worth"))
+        notes = clean_text(rule.get("notes"))
+        values = (
+            bank,
+            account,
+            classification,
+            include_in_inbox,
+            include_in_net_worth,
+            notes,
+            updated_at,
+        )
+        if is_postgres():
+            c.execute(f'''
+                INSERT INTO account_rules
+                    (bank, account, classification, include_in_inbox,
+                     include_in_net_worth, notes, updated_at)
+                VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                ON CONFLICT (bank, account) DO UPDATE SET
+                    classification = EXCLUDED.classification,
+                    include_in_inbox = EXCLUDED.include_in_inbox,
+                    include_in_net_worth = EXCLUDED.include_in_net_worth,
+                    notes = EXCLUDED.notes,
+                    updated_at = EXCLUDED.updated_at
+            ''', values)
+        else:
+            c.execute(f'''
+                INSERT INTO account_rules
+                    (bank, account, classification, include_in_inbox,
+                     include_in_net_worth, notes, updated_at)
+                VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                ON CONFLICT (bank, account) DO UPDATE SET
+                    classification = excluded.classification,
+                    include_in_inbox = excluded.include_in_inbox,
+                    include_in_net_worth = excluded.include_in_net_worth,
+                    notes = excluded.notes,
+                    updated_at = excluded.updated_at
+            ''', values)
+        count += 1
+    conn.commit()
+    conn.close()
+    return count
 
 def generate_id(row):
     # Create a deterministic ID to avoid duplicates
