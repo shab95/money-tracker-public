@@ -382,3 +382,24 @@ def test_latest_balance_context_reports_balance_count(monkeypatch, tmp_path):
     assert context["latest_sync_returned_no_balances"] is False
     assert context["balance_accounts_seen"] == 1
     assert len(context["balances"]) == 1
+
+
+def test_account_rules_roundtrip(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+
+    saved = db.upsert_account_rules([{
+        "bank": "Fidelity Investments",
+        "account": "Self-Directed Brokerage (3743)",
+        "classification": "Retirement / Restricted",
+        "include_in_inbox": False,
+        "include_in_net_worth": True,
+        "notes": "Retirement account",
+    }])
+
+    assert saved == 1
+    rules = db.get_account_rules()
+    assert len(rules) == 1
+    row = rules.iloc[0]
+    assert row["classification"] == "Retirement / Restricted"
+    assert bool(row["include_in_inbox"]) is False
+    assert bool(row["include_in_net_worth"]) is True

@@ -32,3 +32,15 @@ def test_fidelity_self_directed_brokerage_skips_inbox_sync_as_retirement():
     included, reason = ac.should_sync_transactions("Fidelity Investments", "Self-Directed Brokerage (3743)")
     assert included is False
     assert reason == "retirement_or_restricted_account"
+
+
+def test_account_rule_overrides_classification_and_inbox_sync():
+    rule = {
+        "classification": ac.RETIREMENT_RESTRICTED,
+        "include_in_inbox": False,
+    }
+
+    assert ac.classify_account("E*Trade", "Stock Plan (1934)", 100, rule=rule) == ac.RETIREMENT_RESTRICTED
+    included, reason = ac.should_sync_transactions("Capital One", "360 Checking (3285)", rule=rule)
+    assert included is False
+    assert reason == "account_rule_excluded_from_inbox"

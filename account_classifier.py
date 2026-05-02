@@ -5,6 +5,7 @@ CASH = "Cash"
 TAXABLE_INVESTMENTS = "Taxable Investments"
 RETIREMENT_RESTRICTED = "Retirement / Restricted"
 LIABILITY = "Liability"
+ACCOUNT_CLASSIFICATIONS = [CASH, TAXABLE_INVESTMENTS, RETIREMENT_RESTRICTED, LIABILITY]
 
 # Backwards-compatible aliases for older code/tests.
 LIQUID = CASH
@@ -53,7 +54,54 @@ def normalize_account_name(value):
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
-def classify_account(bank, account, balance=0.0):
+def normalize_bank_name(value):
+    return re.sub(r"\s+", " ", (value or "")).strip().lower()
+
+
+def account_rule_key(bank, account):
+    return (normalize_bank_name(bank), normalize_account_name(account))
+
+
+def rules_to_map(rules):
+    if rules is None:
+        return {}
+    if hasattr(rules, "to_dict"):
+        records = rules.to_dict("records")
+    else:
+        records = rules
+    return {
+        account_rule_key(item.get("bank"), item.get("account")): item
+        for item in records
+        if item.get("bank") and item.get("account")
+    }
+
+
+def get_account_rule(rules_map, bank, account):
+    return (rules_map or {}).get(account_rule_key(bank, account), {})
+
+
+def optional_bool(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "include", "1"}:
+            return True
+        if lowered in {"false", "no", "exclude", "0"}:
+            return False
+        return None
+    return bool(value)
+
+
+_optional_bool = optional_bool
+
+
+def classify_account(bank, account, balance=0.0, rule=None):
+    rule = rule or {}
+    rule_classification = rule.get("classification")
+    if rule_classification in ACCOUNT_CLASSIFICATIONS:
+        return rule_classification
+
     text = f"{bank or ''} {account or ''}".lower()
     normalized = normalize_account_name(account)
     bank_text = (bank or "").lower()
@@ -76,7 +124,12 @@ def classify_account(bank, account, balance=0.0):
     return CASH
 
 
-def should_sync_transactions(bank, account):
+def should_sync_transactions(bank, account, rule=None):
+    rule = rule or {}
+    include_override = optional_bool(rule.get("include_in_inbox"))
+    if include_override is not None:
+        return (True, "") if include_override else (False, "account_rule_excluded_from_inbox")
+
     text = f"{bank or ''} {account or ''}".lower()
     normalized = normalize_account_name(account)
     bank_text = (bank or "").lower()

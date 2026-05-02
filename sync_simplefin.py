@@ -122,12 +122,16 @@ def coerce_balance(balance):
         return None
 
 
-def build_balance_snapshot_rows(accounts, duplicate_reasons):
+def build_balance_snapshot_rows(accounts, duplicate_reasons, rules_map=None):
     rows = []
     for account in accounts:
         bank_name = account.get('org', {}).get('name', 'Unknown Bank')
         account_name = account.get('name', 'Unknown Acct')
         if duplicate_reasons.get((bank_name, account_name), ""):
+            continue
+        rule = account_classifier.get_account_rule(rules_map, bank_name, account_name)
+        include_in_net_worth = account_classifier.optional_bool(rule.get("include_in_net_worth"))
+        if include_in_net_worth is False:
             continue
 
         balance = coerce_balance(account.get('balance'))
@@ -138,7 +142,7 @@ def build_balance_snapshot_rows(accounts, duplicate_reasons):
             "Bank": bank_name,
             "Account": account_name,
             "Balance": balance,
-            "Classification": account_classifier.classify_account(bank_name, account_name, balance),
+            "Classification": account_classifier.classify_account(bank_name, account_name, balance, rule=rule),
         })
     return rows
 
@@ -203,8 +207,9 @@ def sync():
 
     # 3. Process & Normalize
     accounts = json_data.get('accounts', [])
+    rules_map = account_classifier.rules_to_map(db.get_account_rules())
     duplicate_reasons = find_duplicate_connection_reasons(accounts)
-    balance_snapshot_rows = build_balance_snapshot_rows(accounts, duplicate_reasons)
+    balance_snapshot_rows = build_balance_snapshot_rows(accounts, duplicate_reasons, rules_map)
     report["balance_accounts_seen"] = len(balance_snapshot_rows)
     for account in accounts:
         bank_name = account.get('org', {}).get('name', 'Unknown Bank')
@@ -214,7 +219,8 @@ def sync():
         if duplicate_reason:
             include_account, skip_reason = False, duplicate_reason
         else:
-            include_account, skip_reason = account_classifier.should_sync_transactions(bank_name, account_name)
+            rule = account_classifier.get_account_rule(rules_map, bank_name, account_name)
+            include_account, skip_reason = account_classifier.should_sync_transactions(bank_name, account_name, rule=rule)
         latest_transaction_date = get_latest_transaction_date(txs)
         balance = coerce_balance(account.get('balance'))
         account_report = {
