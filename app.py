@@ -41,6 +41,16 @@ def connection_health_label(row):
     return row.get("health_status", "Needs review")
 
 
+def balance_status_label(row):
+    if is_duplicate_connection(row.get("skip_reason")):
+        return "Duplicate"
+    if pd.isna(row.get("balance")):
+        return "No balance returned"
+    if bool(row.get("possibly_stale")):
+        return "Possibly stale"
+    return "Balance returned"
+
+
 def render_bank_sync_button(key="sync_with_banks"):
     if ROLE != 'admin':
         st.caption("Syncing disabled for Viewers")
@@ -634,7 +644,8 @@ with tab2:
             run = latest_run.iloc[0]
             st.caption(
                 f"Last sync: {run['status']} at {run['finished_at']} | "
-                f"{run['transactions_inserted']} new, {run['duplicates']} duplicates"
+                f"{run['transactions_inserted']} new, {run['duplicates']} duplicates | "
+                f"{run.get('balance_accounts_seen', 0)} balances"
             )
             if run.get('sync_start_date') and run.get('sync_end_date'):
                 st.caption(f"Transaction window: {run['sync_start_date']} to {run['sync_end_date']}")
@@ -672,6 +683,7 @@ with tab2:
                     & ~display_sync["skip_reason"].fillna("").str.startswith("duplicate_connection")
                 )
                 display_sync["Connection Health"] = display_sync.apply(connection_health_label, axis=1)
+                display_sync["Balance Status"] = display_sync.apply(balance_status_label, axis=1)
                 display_sync["Action"] = display_sync.apply(connection_action, axis=1)
 
                 show_duplicate_connections = st.checkbox(
@@ -690,14 +702,14 @@ with tab2:
                 data_count = int(
                     ((visible_sync["transaction_count"].fillna(0) > 0) | visible_sync["balance"].notna()).sum()
                 )
+                balance_count = int(visible_sync["balance"].notna().sum())
                 inbox_count = int(visible_sync["included"].sum())
-                net_worth_count = int((visible_sync["Used in Net Worth"] == "Yes").sum())
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Healthy", healthy_count, help="Visible connections with no action needed")
                 m2.metric("Needs Review", needs_review_count, help="Visible connections that likely need a SimpleFIN check")
                 m3.metric("Returning Data", data_count, help="Visible connections with a balance or transactions")
                 m4.metric("Used in Inbox", inbox_count)
-                m5.metric("Used in Net Worth", net_worth_count)
+                m5.metric("Balances", balance_count, help="Visible connections with a balance returned by the latest sync")
 
                 visible_sync = visible_sync.rename(columns={
                     "bank": "Bank",
@@ -713,7 +725,7 @@ with tab2:
                     "error": "Error",
                 })
                 visible_sync = visible_sync[[
-                    "Bank", "Account", "Connection Health", "Used in Inbox", "Used in Net Worth",
+                    "Bank", "Account", "Connection Health", "Balance Status", "Used in Inbox", "Used in Net Worth",
                     "Tx Seen", "Latest Tx", "Balance", "Currency", "Balance Unchanged Since",
                     "Days Unchanged", "Action", "New", "Duplicates", "Error"
                 ]]
@@ -888,12 +900,29 @@ with tab4:
         st.warning("🔒 Privacy Mode Enabled. Net Worth Hidden.")
         st.metric("Total Net Worth", "****")
     else:
-        nw_df = db.get_latest_balance_snapshot()
+        balance_context = db.get_latest_balance_context()
+        latest_sync = balance_context["latest_sync"]
+        nw_df = balance_context["balances"]
         if nw_df.empty:
-            st.info("No balance snapshot yet. Use Sync with Banks to refresh account balances.")
+            if balance_context["latest_sync_returned_no_balances"]:
+                sync_time = latest_sync.iloc[0]["finished_at"] if not latest_sync.empty else ""
+                st.warning(
+                    f"Latest successful sync at {sync_time} returned no usable balances. "
+                    "Net Worth is hidden instead of falling back to older balances."
+                )
+            else:
+                st.info("No balance snapshot yet. Use Sync with Banks to refresh account balances.")
         else:
-            latest_date = nw_df["date"].iloc[0]
-            st.caption(f"Latest snapshot: {latest_date}. Use Sync with Banks to refresh.")
+            latest_date = balance_context["snapshot_date"] or nw_df["date"].iloc[0]
+            if not latest_sync.empty:
+                sync = latest_sync.iloc[0]
+                st.caption(
+                    f"Latest successful sync: {sync['finished_at']} | "
+                    f"Snapshot date: {latest_date} | "
+                    f"{balance_context['balance_accounts_seen']} balance accounts returned"
+                )
+            else:
+                st.caption(f"Latest stored snapshot: {latest_date}. Use Sync with Banks to refresh.")
             nw_df = nw_df.copy()
             nw_df["classification"] = nw_df["classification"].fillna(account_classifier.CASH)
             nw_df["balance"] = pd.to_numeric(nw_df["balance"], errors="coerce").fillna(0.0)

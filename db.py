@@ -144,6 +144,7 @@ def init_db():
                 transactions_seen INTEGER,
                 transactions_inserted INTEGER,
                 duplicates INTEGER,
+                balance_accounts_seen INTEGER,
                 sync_start_date TEXT,
                 sync_end_date TEXT,
                 error TEXT
@@ -187,6 +188,7 @@ def init_db():
         _ensure_pg_column(c, "balance_history", "classification", "TEXT")
         _ensure_pg_column(c, "sync_runs", "sync_start_date", "TEXT")
         _ensure_pg_column(c, "sync_runs", "sync_end_date", "TEXT")
+        _ensure_pg_column(c, "sync_runs", "balance_accounts_seen", "INTEGER")
         _ensure_pg_column(c, "sync_account_results", "latest_transaction_date", "TEXT")
         _ensure_pg_column(c, "sync_account_results", "balance", "REAL")
         _ensure_pg_column(c, "sync_account_results", "currency", "TEXT")
@@ -252,6 +254,7 @@ def init_db():
                 transactions_seen INTEGER,
                 transactions_inserted INTEGER,
                 duplicates INTEGER,
+                balance_accounts_seen INTEGER,
                 sync_start_date TEXT,
                 sync_end_date TEXT,
                 error TEXT
@@ -259,6 +262,7 @@ def init_db():
         ''')
         _ensure_sqlite_column(c, "sync_runs", "sync_start_date", "TEXT")
         _ensure_sqlite_column(c, "sync_runs", "sync_end_date", "TEXT")
+        _ensure_sqlite_column(c, "sync_runs", "balance_accounts_seen", "INTEGER")
         c.execute('''
             CREATE TABLE IF NOT EXISTS sync_account_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -728,6 +732,59 @@ def get_latest_balance_snapshot():
         conn.close()
 
 
+def get_latest_balance_context():
+    conn = get_connection()
+    ph = '%s' if is_postgres() else '?'
+    try:
+        latest_sync = pd.read_sql_query('''
+            SELECT id, started_at, finished_at, status, accounts_seen, accounts_included,
+                   accounts_skipped, transactions_seen, transactions_inserted, duplicates,
+                   COALESCE(balance_accounts_seen, 0) AS balance_accounts_seen,
+                   sync_start_date, sync_end_date, error
+            FROM sync_runs
+            WHERE status = 'success'
+            ORDER BY id DESC
+            LIMIT 1
+        ''', conn)
+
+        if latest_sync.empty:
+            fallback = pd.read_sql_query('''
+                SELECT date, bank, account, balance, classification
+                FROM balance_history
+                WHERE date = (SELECT MAX(date) FROM balance_history)
+                ORDER BY classification, bank, account
+            ''', conn)
+            return {
+                "latest_sync": pd.DataFrame(),
+                "balances": fallback,
+                "snapshot_date": fallback["date"].iloc[0] if not fallback.empty else "",
+                "balance_accounts_seen": len(fallback),
+                "has_successful_sync": False,
+                "latest_sync_returned_no_balances": False,
+            }
+
+        sync = latest_sync.iloc[0]
+        sync_time = sync["finished_at"] or sync["started_at"]
+        sync_date = pd.to_datetime(sync_time).strftime("%Y-%m-%d")
+        balances = pd.read_sql_query(f'''
+            SELECT date, bank, account, balance, classification
+            FROM balance_history
+            WHERE date = {ph}
+            ORDER BY classification, bank, account
+        ''', conn, params=(sync_date,))
+        balance_accounts_seen = int(sync.get("balance_accounts_seen") or 0)
+        return {
+            "latest_sync": latest_sync,
+            "balances": balances,
+            "snapshot_date": sync_date,
+            "balance_accounts_seen": balance_accounts_seen,
+            "has_successful_sync": True,
+            "latest_sync_returned_no_balances": balance_accounts_seen == 0,
+        }
+    finally:
+        conn.close()
+
+
 def get_balance_freshness(as_of_date=None):
     history = get_balance_history_details()
     if history.empty:
@@ -781,6 +838,7 @@ def save_sync_report(report):
         report.get('transactions_seen', 0),
         report.get('transactions_inserted', 0),
         report.get('duplicates', 0),
+        report.get('balance_accounts_seen', 0),
         report.get('sync_start_date'),
         report.get('sync_end_date'),
         report.get('error', '')
@@ -789,8 +847,9 @@ def save_sync_report(report):
         c.execute(f'''
             INSERT INTO sync_runs
             (started_at, finished_at, status, accounts_seen, accounts_included, accounts_skipped,
-             transactions_seen, transactions_inserted, duplicates, sync_start_date, sync_end_date, error)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+             transactions_seen, transactions_inserted, duplicates, balance_accounts_seen,
+             sync_start_date, sync_end_date, error)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
             RETURNING id
         ''', values)
         sync_run_id = c.fetchone()[0]
@@ -798,8 +857,9 @@ def save_sync_report(report):
         c.execute(f'''
             INSERT INTO sync_runs
             (started_at, finished_at, status, accounts_seen, accounts_included, accounts_skipped,
-             transactions_seen, transactions_inserted, duplicates, sync_start_date, sync_end_date, error)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+             transactions_seen, transactions_inserted, duplicates, balance_accounts_seen,
+             sync_start_date, sync_end_date, error)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
         ''', values)
         sync_run_id = c.lastrowid
 
@@ -836,6 +896,7 @@ def get_latest_sync_account_results():
     latest = pd.read_sql_query('''
         SELECT id, started_at, finished_at, status, accounts_seen, accounts_included,
                accounts_skipped, transactions_seen, transactions_inserted, duplicates,
+               COALESCE(balance_accounts_seen, 0) AS balance_accounts_seen,
                sync_start_date, sync_end_date, error
         FROM sync_runs
         ORDER BY id DESC
