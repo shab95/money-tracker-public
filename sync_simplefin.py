@@ -327,8 +327,12 @@ def sync():
         print("No transactions found.")
     report["status"] = "success"
     report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-    db.save_balance_snapshot(pd.DataFrame(balance_snapshot_rows), replace_for_today=True)
-    db.save_sync_report(report)
+    sync_run_id = db.save_sync_report(report)
+    db.save_balance_snapshot(
+        pd.DataFrame(balance_snapshot_rows),
+        replace_for_today=True,
+        sync_run_id=sync_run_id,
+    )
     return report
 
 if __name__ == "__main__":

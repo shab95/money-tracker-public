@@ -353,6 +353,9 @@ def test_empty_balance_snapshot_replace_mode_clears_today(monkeypatch, tmp_path)
     db.save_balance_snapshot(pd.DataFrame(), replace_for_today=True)
 
     assert db.get_balance_history_details().empty
+    latest_run = db.get_latest_balance_snapshot_run()
+    assert latest_run.iloc[0]["account_count"] == 0
+    assert db.get_latest_balance_snapshot().empty
 
 
 def test_latest_balance_context_reports_balance_count(monkeypatch, tmp_path):

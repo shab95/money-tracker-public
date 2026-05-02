@@ -133,6 +133,16 @@ def init_db():
             );
         ''')
         c.execute('''
+            CREATE TABLE IF NOT EXISTS balance_snapshot_runs (
+                id SERIAL PRIMARY KEY,
+                snapshot_date TEXT UNIQUE,
+                sync_run_id INTEGER,
+                account_count INTEGER,
+                status TEXT,
+                updated_at TEXT
+            );
+        ''')
+        c.execute('''
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id SERIAL PRIMARY KEY,
                 started_at TEXT,
@@ -206,6 +216,10 @@ def init_db():
         _ensure_pg_column(c, "sync_account_results", "balance", "REAL")
         _ensure_pg_column(c, "sync_account_results", "currency", "TEXT")
         _ensure_pg_column(c, "sync_account_results", "health_status", "TEXT")
+        _ensure_pg_column(c, "balance_snapshot_runs", "sync_run_id", "INTEGER")
+        _ensure_pg_column(c, "balance_snapshot_runs", "account_count", "INTEGER")
+        _ensure_pg_column(c, "balance_snapshot_runs", "status", "TEXT")
+        _ensure_pg_column(c, "balance_snapshot_runs", "updated_at", "TEXT")
         _ensure_pg_column(c, "account_rules", "classification", "TEXT")
         _ensure_pg_column(c, "account_rules", "include_in_inbox", "BOOLEAN")
         _ensure_pg_column(c, "account_rules", "include_in_net_worth", "BOOLEAN")
@@ -260,6 +274,20 @@ def init_db():
             )
         ''')
         _ensure_sqlite_column(c, "balance_history", "classification", "TEXT")
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS balance_snapshot_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT UNIQUE,
+                sync_run_id INTEGER,
+                account_count INTEGER,
+                status TEXT,
+                updated_at TEXT
+            )
+        ''')
+        _ensure_sqlite_column(c, "balance_snapshot_runs", "sync_run_id", "INTEGER")
+        _ensure_sqlite_column(c, "balance_snapshot_runs", "account_count", "INTEGER")
+        _ensure_sqlite_column(c, "balance_snapshot_runs", "status", "TEXT")
+        _ensure_sqlite_column(c, "balance_snapshot_runs", "updated_at", "TEXT")
         c.execute('''
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -758,7 +786,7 @@ def review_transaction(tx_id, category, user_notes, tags, tx_type, reviewed_by='
 # Initialize on import
 init_db()
 
-def save_balance_snapshot(balances_df, replace_for_today=False):
+def save_balance_snapshot(balances_df, replace_for_today=False, sync_run_id=None):
     """
     Saves a snapshot of current balances for today.
     Upserts accounts present in the provided snapshot. Use replace_for_today
@@ -771,6 +799,32 @@ def save_balance_snapshot(balances_df, replace_for_today=False):
 
     if replace_for_today:
         c.execute(f"DELETE FROM balance_history WHERE date = {ph}", (today,))
+
+    if replace_for_today:
+        account_count = 0 if balances_df.empty else len(balances_df)
+        updated_at = datetime.now().isoformat(timespec="seconds")
+        if is_postgres():
+            c.execute(f'''
+                INSERT INTO balance_snapshot_runs
+                    (snapshot_date, sync_run_id, account_count, status, updated_at)
+                VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
+                ON CONFLICT (snapshot_date) DO UPDATE SET
+                    sync_run_id = EXCLUDED.sync_run_id,
+                    account_count = EXCLUDED.account_count,
+                    status = EXCLUDED.status,
+                    updated_at = EXCLUDED.updated_at
+            ''', (today, sync_run_id, account_count, "success", updated_at))
+        else:
+            c.execute(f'''
+                INSERT INTO balance_snapshot_runs
+                    (snapshot_date, sync_run_id, account_count, status, updated_at)
+                VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
+                ON CONFLICT (snapshot_date) DO UPDATE SET
+                    sync_run_id = excluded.sync_run_id,
+                    account_count = excluded.account_count,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+            ''', (today, sync_run_id, account_count, "success", updated_at))
 
     if balances_df.empty:
         conn.commit()
@@ -825,10 +879,38 @@ def get_balance_history_details():
     return df
 
 
+def get_latest_balance_snapshot_run(conn=None):
+    own_conn = conn is None
+    if conn is None:
+        conn = get_connection()
+    try:
+        return pd.read_sql_query('''
+            SELECT id, snapshot_date, sync_run_id, COALESCE(account_count, 0) AS account_count,
+                   status, updated_at
+            FROM balance_snapshot_runs
+            WHERE status = 'success'
+            ORDER BY snapshot_date DESC, id DESC
+            LIMIT 1
+        ''', conn)
+    finally:
+        if own_conn:
+            conn.close()
+
+
 def get_latest_balance_snapshot():
     conn = get_connection()
     ph = '%s' if is_postgres() else '?'
     try:
+        latest_snapshot_run = get_latest_balance_snapshot_run(conn)
+        if not latest_snapshot_run.empty:
+            snapshot_date = latest_snapshot_run.iloc[0]["snapshot_date"]
+            return pd.read_sql_query(f'''
+                SELECT date, bank, account, balance, classification
+                FROM balance_history
+                WHERE date = {ph}
+                ORDER BY classification, bank, account
+            ''', conn, params=(snapshot_date,))
+
         latest_sync = pd.read_sql_query('''
             SELECT finished_at, started_at
             FROM sync_runs
@@ -861,6 +943,7 @@ def get_latest_balance_context():
     conn = get_connection()
     ph = '%s' if is_postgres() else '?'
     try:
+        latest_snapshot_run = get_latest_balance_snapshot_run(conn)
         latest_sync = pd.read_sql_query('''
             SELECT id, started_at, finished_at, status, accounts_seen, accounts_included,
                    accounts_skipped, transactions_seen, transactions_inserted, duplicates,
@@ -872,7 +955,7 @@ def get_latest_balance_context():
             LIMIT 1
         ''', conn)
 
-        if latest_sync.empty:
+        if latest_sync.empty and latest_snapshot_run.empty:
             fallback = pd.read_sql_query('''
                 SELECT date, bank, account, balance, classification
                 FROM balance_history
@@ -888,22 +971,28 @@ def get_latest_balance_context():
                 "latest_sync_returned_no_balances": False,
             }
 
-        sync = latest_sync.iloc[0]
-        sync_time = sync["finished_at"] or sync["started_at"]
-        sync_date = pd.to_datetime(sync_time).strftime("%Y-%m-%d")
+        if not latest_snapshot_run.empty:
+            snapshot = latest_snapshot_run.iloc[0]
+            sync_date = snapshot["snapshot_date"]
+            balance_accounts_seen = int(snapshot.get("account_count") or 0)
+        else:
+            sync = latest_sync.iloc[0]
+            sync_time = sync["finished_at"] or sync["started_at"]
+            sync_date = pd.to_datetime(sync_time).strftime("%Y-%m-%d")
+            balance_accounts_seen = int(sync.get("balance_accounts_seen") or 0)
+
         balances = pd.read_sql_query(f'''
             SELECT date, bank, account, balance, classification
             FROM balance_history
             WHERE date = {ph}
             ORDER BY classification, bank, account
         ''', conn, params=(sync_date,))
-        balance_accounts_seen = int(sync.get("balance_accounts_seen") or 0)
         return {
             "latest_sync": latest_sync,
             "balances": balances,
             "snapshot_date": sync_date,
             "balance_accounts_seen": balance_accounts_seen,
-            "has_successful_sync": True,
+            "has_successful_sync": not latest_sync.empty,
             "latest_sync_returned_no_balances": balance_accounts_seen == 0,
         }
     finally:
