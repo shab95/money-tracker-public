@@ -1,4 +1,5 @@
 import pandas as pd
+from datetime import datetime
 
 from conftest import reload_db
 
@@ -41,6 +42,7 @@ def test_sync_report_roundtrip(monkeypatch, tmp_path):
         "transactions_seen": 2,
         "transactions_inserted": 1,
         "duplicates": 1,
+        "balance_accounts_seen": 1,
         "sync_start_date": "2026-04-01",
         "sync_end_date": "2026-04-29",
         "accounts": [
@@ -74,6 +76,7 @@ def test_sync_report_roundtrip(monkeypatch, tmp_path):
     db.save_sync_report(report)
     latest, accounts = db.get_latest_sync_account_results()
     assert latest.iloc[0]["transactions_inserted"] == 1
+    assert latest.iloc[0]["balance_accounts_seen"] == 1
     assert latest.iloc[0]["sync_start_date"] == "2026-04-01"
     assert set(accounts["skip_reason"]) == {"", "retirement_or_restricted_account"}
     checking = accounts[accounts["account"] == "360 Checking"].iloc[0]
@@ -350,3 +353,32 @@ def test_empty_balance_snapshot_replace_mode_clears_today(monkeypatch, tmp_path)
     db.save_balance_snapshot(pd.DataFrame(), replace_for_today=True)
 
     assert db.get_balance_history_details().empty
+
+
+def test_latest_balance_context_reports_balance_count(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    db.save_balance_snapshot(pd.DataFrame([
+        {
+            "Bank": "Capital One",
+            "Account": "360 Checking (3285)",
+            "Balance": 100.0,
+            "Classification": "Cash",
+        },
+    ]), replace_for_today=True)
+    db.save_sync_report({
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "status": "success",
+        "transactions_seen": 0,
+        "transactions_inserted": 0,
+        "duplicates": 0,
+        "balance_accounts_seen": 1,
+        "accounts": [],
+    })
+
+    context = db.get_latest_balance_context()
+
+    assert context["has_successful_sync"] is True
+    assert context["latest_sync_returned_no_balances"] is False
+    assert context["balance_accounts_seen"] == 1
+    assert len(context["balances"]) == 1

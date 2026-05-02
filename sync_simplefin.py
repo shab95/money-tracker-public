@@ -164,6 +164,7 @@ def sync():
         "transactions_seen": 0,
         "transactions_inserted": 0,
         "duplicates": 0,
+        "balance_accounts_seen": 0,
         "error": "",
     }
 
@@ -204,6 +205,7 @@ def sync():
     accounts = json_data.get('accounts', [])
     duplicate_reasons = find_duplicate_connection_reasons(accounts)
     balance_snapshot_rows = build_balance_snapshot_rows(accounts, duplicate_reasons)
+    report["balance_accounts_seen"] = len(balance_snapshot_rows)
     for account in accounts:
         bank_name = account.get('org', {}).get('name', 'Unknown Bank')
         account_name = account.get('name', 'Unknown Acct')
