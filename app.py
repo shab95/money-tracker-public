@@ -4,6 +4,7 @@ import pandas as pd
 import db
 import sync_simplefin
 import account_classifier
+import ml_utils
 import math
 from datetime import datetime, timedelta
 import time
@@ -288,10 +289,6 @@ with st.sidebar:
                              # Clean symbol
                             clean_amt = float(raw_amt_str.replace('+', '').replace('-', ''))
                             
-                            # Default Values
-                            tx_type = 'Expense'
-                            category = 'Uncategorized'
-                            
                             # Logic
                             v_type = row['Type']
                             note = str(row['Note']) if not pd.isna(row['Note']) else ""
@@ -306,6 +303,11 @@ with st.sidebar:
                             # And maybe details?
                             
                             user_note = row['Note'] if not pd.isna(row['Note']) else ""
+                            prediction_text = f"{desc} {note}".strip()
+                            signed_amount = clean_amt if is_positive else -clean_amt
+                            pred = ml_utils.classifier.predict(prediction_text, signed_amount)
+                            category = pred.get('category', 'Uncategorized')
+                            confidence = float(pred.get('confidence', 0.0))
                                 
                             # 1. Standard Transfer
                             if v_type == 'Standard Transfer':
@@ -320,10 +322,17 @@ with st.sidebar:
                             # 3. Negative -> Expense
                             else:
                                 tx_type = 'Expense'
+
+                            ml_note = ""
+                            if not pred.get('model_available'):
+                                ml_note = "ML model not trained"
+                            elif confidence < 0.6:
+                                ml_note = f"Low Confidence ({int(confidence*100)}%)"
+                            if ml_note:
+                                user_note = f"{user_note} | {ml_note}" if user_note else ml_note
                                 
                             # Add to list
                             processed_txs.append({
-                                'id': v_id, # Deduplication Key!
                                 'date': v_date,
                                 'amount': abs(clean_amt),
                                 'description': desc,
@@ -336,7 +345,10 @@ with st.sidebar:
                                 'raw_data': str(row.to_dict()),
                                 'account': 'Venmo',
                                 'posted_date': v_date,
-                                'details': f"Statement Period: {row.get('Statement Period Venmo Fees', '')}"
+                                'details': f"Venmo ID: {v_id}; Statement Period: {row.get('Statement Period Venmo Fees', '')}",
+                                'ml_confidence': confidence,
+                                'ml_category_confidence': float(pred.get('cat_confidence', 0.0)),
+                                'ml_type_confidence': float(pred.get('type_confidence', 0.0)),
                             })
                             
                         # Upsert

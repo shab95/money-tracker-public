@@ -613,6 +613,49 @@ def legacy_duplicate_matches_existing(row, legacy_ids):
 
     return False
 
+
+def is_venmo_import(row):
+    tags = clean_text(row.get('tags')).lower()
+    account = normalize_source_text(row.get('account')).lower()
+    method = normalize_source_text(row.get('method')).lower()
+    return "venmo_import" in tags or account == "venmo" or method == "venmo"
+
+
+def venmo_duplicate_matches_existing(row):
+    if not is_venmo_import(row):
+        return False
+
+    conn = get_connection()
+    ph = '%s' if is_postgres() else '?'
+    try:
+        df = pd.read_sql_query(f'''
+            SELECT id, date, amount, description, account, method
+            FROM transactions
+            WHERE date = {ph}
+              AND description = {ph}
+              AND (account = {ph} OR method = {ph})
+        ''', conn, params=(row['date'], row['description'], 'Venmo', 'Venmo'))
+    finally:
+        conn.close()
+
+    if df.empty:
+        return False
+
+    try:
+        new_amount = float(row.get('amount'))
+    except (TypeError, ValueError):
+        return False
+
+    for _, existing in df.iterrows():
+        try:
+            existing_amount = float(existing.get('amount'))
+        except (TypeError, ValueError):
+            continue
+        if abs(existing_amount - new_amount) < 0.005:
+            return True
+    return False
+
+
 def get_review_audit_values(row):
     status = row.get('status', 'PENDING')
     if str(status).upper() != 'REVIEWED':
@@ -651,6 +694,8 @@ def upsert_transactions(df):
             
         try:
             if tx_id not in legacy_ids and legacy_duplicate_matches_existing(row, legacy_ids):
+                continue
+            if venmo_duplicate_matches_existing(row):
                 continue
 
             # We use INSERT OR IGNORE (SQLite) / ON CONFLICT DO NOTHING (Postgres)
