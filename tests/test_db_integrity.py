@@ -202,6 +202,37 @@ def test_simplefin_legacy_guard_allows_same_charge_on_different_account(monkeypa
     assert len(db.get_all_transactions()) == 2
 
 
+def test_venmo_import_does_not_duplicate_reviewed_row_with_changed_csv_id(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    reviewed_row = {
+        "id": "venmo-old-export-id",
+        "date": "2026-05-20",
+        "amount": 3.30,
+        "description": "Venmo - Shabarish Nair / Starbucks",
+        "category": "Restaurants",
+        "type": "Expense",
+        "method": "Venmo",
+        "account": "Venmo",
+        "status": "REVIEWED",
+        "tags": "venmo_import",
+    }
+    db.upsert_transactions(pd.DataFrame([reviewed_row]))
+
+    fresh_upload_row = {
+        **reviewed_row,
+        "id": "venmo-new-export-id",
+        "status": "PENDING",
+        "category": "Uncategorized",
+        "details": "Venmo ID: venmo-new-export-id",
+    }
+
+    assert db.upsert_transactions(pd.DataFrame([fresh_upload_row])) == 0
+    saved = db.get_all_transactions()
+    assert len(saved) == 1
+    assert saved.iloc[0]["status"] == "REVIEWED"
+    assert saved.iloc[0]["category"] == "Restaurants"
+
+
 def test_review_transaction_sets_audit_fields(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     db.upsert_transactions(pd.DataFrame([{
