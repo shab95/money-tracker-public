@@ -243,7 +243,7 @@ with st.sidebar:
                         # We'll try to find the header row dynamically or hardcode skiprows=2
                         # Based on inspection, header is on row 3 (index 2)
                         
-                        df = pd.read_csv(uploaded_file, header=2)
+                        df = pd.read_csv(uploaded_file, header=2, dtype=str)
                         
                         # Validate Columns
                         required_cols = ['ID', 'Datetime', 'Type', 'Status', 'Note', 'From', 'To', 'Amount (total)']
