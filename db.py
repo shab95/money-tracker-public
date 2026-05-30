@@ -621,23 +621,6 @@ def is_venmo_import(row):
     return "venmo_import" in tags or account == "venmo" or method == "venmo"
 
 
-def venmo_match_tokens(*values):
-    text = " ".join(clean_text(value).lower() for value in values)
-    tokens = set(re.findall(r"[a-z0-9]{3,}", text))
-    return tokens - {
-        "venmo",
-        "shabarish",
-        "nair",
-        "payment",
-        "transaction",
-        "personal",
-        "checking",
-        "statement",
-        "period",
-        "nan",
-    }
-
-
 def venmo_duplicate_matches_existing(row):
     if not is_venmo_import(row):
         return False
@@ -647,59 +630,27 @@ def venmo_duplicate_matches_existing(row):
     except (TypeError, ValueError):
         return False
 
-    tx_date = pd.to_datetime(row['date'])
-    start_date = (tx_date - pd.Timedelta(days=2)).strftime('%Y-%m-%d')
-    end_date = (tx_date + pd.Timedelta(days=3)).strftime('%Y-%m-%d')
     min_amount = new_amount - 0.005
     max_amount = new_amount + 0.005
-    new_tokens = venmo_match_tokens(
-        row.get('description'),
-        row.get('user_notes'),
-        row.get('details'),
-    )
-
     conn = get_connection()
     ph = '%s' if is_postgres() else '?'
     try:
         df = pd.read_sql_query(f'''
-            SELECT id, date, amount, description, account, method, user_notes, details, status
+            SELECT id, date, amount, description, account, method
             FROM transactions
-            WHERE date >= {ph}
-              AND date <= {ph}
+            WHERE date = {ph}
+              AND description = {ph}
               AND amount >= {ph}
               AND amount <= {ph}
-        ''', conn, params=(start_date, end_date, min_amount, max_amount))
+              AND (account = {ph} OR method = {ph})
+        ''', conn, params=(row['date'], row['description'], min_amount, max_amount, 'Venmo', 'Venmo'))
     finally:
         conn.close()
 
     if df.empty:
         return False
 
-    for _, existing in df.iterrows():
-        existing_account = normalize_source_text(existing.get('account')).lower()
-        existing_method = normalize_source_text(existing.get('method')).lower()
-        existing_description = clean_text(existing.get('description')).lower()
-
-        if (
-            existing_description == clean_text(row.get('description')).lower()
-            and (existing_account == "venmo" or existing_method == "venmo")
-        ):
-            return True
-
-        existing_tokens = venmo_match_tokens(
-            existing.get('description'),
-            existing.get('user_notes'),
-            existing.get('details'),
-        )
-        if (
-            str(existing.get('status', '')).upper() == 'REVIEWED'
-            and 'venmo' in existing_description
-            and new_tokens
-            and existing_tokens
-            and new_tokens.intersection(existing_tokens)
-        ):
-            return True
-    return False
+    return True
 
 
 def get_review_audit_values(row):
