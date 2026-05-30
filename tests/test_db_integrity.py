@@ -233,7 +233,7 @@ def test_venmo_import_does_not_duplicate_reviewed_row_with_changed_csv_id(monkey
     assert saved.iloc[0]["category"] == "Restaurants"
 
 
-def test_venmo_import_does_not_duplicate_reviewed_bank_side_venmo_row(monkeypatch, tmp_path):
+def test_venmo_import_marks_reviewed_bank_side_venmo_row_as_transfer(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     reviewed_bank_row = {
         "id": "TRN-bank-venmo-starbucks",
@@ -262,11 +262,17 @@ def test_venmo_import_does_not_duplicate_reviewed_bank_side_venmo_row(monkeypatc
         "tags": "venmo_import",
     }
 
-    assert db.upsert_transactions(pd.DataFrame([venmo_upload_row])) == 0
+    assert db.upsert_transactions(pd.DataFrame([venmo_upload_row])) == 1
     saved = db.get_all_transactions()
-    assert len(saved) == 1
-    assert saved.iloc[0]["id"] == "TRN-bank-venmo-starbucks"
-    assert saved.iloc[0]["status"] == "REVIEWED"
+    assert len(saved) == 2
+
+    bank_row = saved[saved["id"] == "TRN-bank-venmo-starbucks"].iloc[0]
+    venmo_row = saved[saved["id"] != "TRN-bank-venmo-starbucks"].iloc[0]
+    assert bank_row["status"] == "REVIEWED"
+    assert bank_row["category"] == "Transfer"
+    assert bank_row["type"] == "Transfer"
+    assert venmo_row["account"] == "Venmo"
+    assert venmo_row["status"] == "PENDING"
 
 
 def test_review_transaction_sets_audit_fields(monkeypatch, tmp_path):

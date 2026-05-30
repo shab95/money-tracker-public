@@ -647,59 +647,87 @@ def venmo_duplicate_matches_existing(row):
     except (TypeError, ValueError):
         return False
 
-    tx_date = pd.to_datetime(row['date'])
-    start_date = (tx_date - pd.Timedelta(days=2)).strftime('%Y-%m-%d')
-    end_date = (tx_date + pd.Timedelta(days=3)).strftime('%Y-%m-%d')
     min_amount = new_amount - 0.005
     max_amount = new_amount + 0.005
-    new_tokens = venmo_match_tokens(
-        row.get('description'),
-        row.get('user_notes'),
-        row.get('details'),
-    )
-
     conn = get_connection()
     ph = '%s' if is_postgres() else '?'
     try:
         df = pd.read_sql_query(f'''
-            SELECT id, date, amount, description, account, method, user_notes, details, status
+            SELECT id, date, amount, description, account, method
             FROM transactions
-            WHERE date >= {ph}
-              AND date <= {ph}
+            WHERE date = {ph}
+              AND description = {ph}
               AND amount >= {ph}
               AND amount <= {ph}
-        ''', conn, params=(start_date, end_date, min_amount, max_amount))
+              AND (account = {ph} OR method = {ph})
+        ''', conn, params=(row['date'], row['description'], min_amount, max_amount, 'Venmo', 'Venmo'))
     finally:
         conn.close()
 
     if df.empty:
         return False
 
-    for _, existing in df.iterrows():
-        existing_account = normalize_source_text(existing.get('account')).lower()
-        existing_method = normalize_source_text(existing.get('method')).lower()
-        existing_description = clean_text(existing.get('description')).lower()
+    return True
 
-        if (
-            existing_description == clean_text(row.get('description')).lower()
-            and (existing_account == "venmo" or existing_method == "venmo")
-        ):
-            return True
 
-        existing_tokens = venmo_match_tokens(
-            existing.get('description'),
-            existing.get('user_notes'),
-            existing.get('details'),
+def mark_matching_bank_venmo_as_transfer(cursor, row, ph):
+    if not is_venmo_import(row):
+        return 0
+
+    tokens = venmo_match_tokens(
+        row.get('description'),
+        row.get('user_notes'),
+        row.get('details'),
+    )
+    if not tokens:
+        return 0
+
+    try:
+        amount = float(row.get('amount'))
+        tx_date = pd.to_datetime(row['date'])
+    except (TypeError, ValueError):
+        return 0
+
+    start_date = (tx_date - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    end_date = (tx_date + pd.Timedelta(days=3)).strftime('%Y-%m-%d')
+    min_amount = amount - 0.005
+    max_amount = amount + 0.005
+
+    conn = cursor.connection
+    candidates = pd.read_sql_query(f'''
+        SELECT id, description, user_notes, details, account, method
+        FROM transactions
+        WHERE date >= {ph}
+          AND date <= {ph}
+          AND amount >= {ph}
+          AND amount <= {ph}
+          AND LOWER(description) = {ph}
+    ''', conn, params=(start_date, end_date, min_amount, max_amount, 'venmo'))
+
+    updated = 0
+    for _, candidate in candidates.iterrows():
+        candidate_account = normalize_source_text(candidate.get('account')).lower()
+        candidate_method = normalize_source_text(candidate.get('method')).lower()
+        if candidate_account == 'venmo' or candidate_method == 'venmo':
+            continue
+
+        candidate_tokens = venmo_match_tokens(
+            candidate.get('description'),
+            candidate.get('user_notes'),
+            candidate.get('details'),
         )
-        if (
-            str(existing.get('status', '')).upper() == 'REVIEWED'
-            and 'venmo' in existing_description
-            and new_tokens
-            and existing_tokens
-            and new_tokens.intersection(existing_tokens)
-        ):
-            return True
-    return False
+        if not tokens.intersection(candidate_tokens):
+            continue
+
+        cursor.execute(f'''
+            UPDATE transactions
+            SET category = {ph},
+                type = {ph}
+            WHERE id = {ph}
+        ''', ('Transfer', 'Transfer', candidate['id']))
+        updated += cursor.rowcount
+
+    return updated
 
 
 def get_review_audit_values(row):
@@ -780,6 +808,7 @@ def upsert_transactions(df):
                 # But executemany/on conflict can be tricky. Assume if no exception, it worked?
                 # Actually cursor.rowcount works for individual insert.
                 if c.rowcount > 0:
+                    mark_matching_bank_venmo_as_transfer(c, row, ph)
                     count += 1
             else:
                 c.execute(f'''
@@ -790,6 +819,7 @@ def upsert_transactions(df):
                     VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
                 ''', vals)
                 if c.rowcount > 0:
+                    mark_matching_bank_venmo_as_transfer(c, row, ph)
                     count += 1
                     
         except Exception as e:
