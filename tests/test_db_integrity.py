@@ -233,7 +233,7 @@ def test_venmo_import_does_not_duplicate_reviewed_row_with_changed_csv_id(monkey
     assert saved.iloc[0]["category"] == "Restaurants"
 
 
-def test_venmo_import_marks_reviewed_bank_side_venmo_row_as_transfer(monkeypatch, tmp_path):
+def test_venmo_import_does_not_skip_reviewed_bank_side_venmo_row(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     reviewed_bank_row = {
         "id": "TRN-bank-venmo-starbucks",
@@ -269,8 +269,8 @@ def test_venmo_import_marks_reviewed_bank_side_venmo_row_as_transfer(monkeypatch
     bank_row = saved[saved["id"] == "TRN-bank-venmo-starbucks"].iloc[0]
     venmo_row = saved[saved["id"] != "TRN-bank-venmo-starbucks"].iloc[0]
     assert bank_row["status"] == "REVIEWED"
-    assert bank_row["category"] == "Transfer"
-    assert bank_row["type"] == "Transfer"
+    assert bank_row["category"] == "Fast Food"
+    assert bank_row["type"] == "Expense"
     assert venmo_row["account"] == "Venmo"
     assert venmo_row["status"] == "PENDING"
 
