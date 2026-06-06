@@ -26,6 +26,13 @@ def test_taxable_investment_accounts():
 def test_liability_and_liquid_accounts():
     assert ac.classify_account("Capital One", "360 Checking (3285)", 100) == ac.CASH
     assert ac.classify_account("American Express", "American Express Gold Card (1006)", -121) == ac.LIABILITY
+    assert ac.classify_account("Robinhood", "Robinhood Credit Card **2999 (2999)", 0) == ac.LIABILITY
+
+
+def test_robinhood_credit_card_syncs_for_inbox():
+    included, reason = ac.should_sync_transactions("Robinhood", "Robinhood Credit Card **2999 (2999)")
+    assert included is True
+    assert reason == ""
 
 
 def test_fidelity_self_directed_brokerage_skips_inbox_sync_as_retirement():
