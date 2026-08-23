@@ -47,6 +47,13 @@ LIQUID_KEYWORDS = [
     "savings",
 ]
 
+FIDELITY_RETIREMENT_ACCOUNT_KEYWORDS = [
+    "brokeragelink",
+    "self-directed brokerage",
+    "savings plan",
+    "associate savings plan",
+]
+
 
 def normalize_account_name(value):
     value = value or ""
@@ -96,6 +103,13 @@ def optional_bool(value):
 _optional_bool = optional_bool
 
 
+def is_fidelity_retirement_account(bank, normalized_account, text):
+    bank_text = (bank or "").lower()
+    if "fidelity" not in bank_text:
+        return False
+    return any(keyword in normalized_account or keyword in text for keyword in FIDELITY_RETIREMENT_ACCOUNT_KEYWORDS)
+
+
 def classify_account(bank, account, balance=0.0, rule=None):
     rule = rule or {}
     rule_classification = rule.get("classification")
@@ -106,7 +120,7 @@ def classify_account(bank, account, balance=0.0, rule=None):
     normalized = normalize_account_name(account)
     bank_text = (bank or "").lower()
 
-    if "fidelity" in bank_text and normalized == "self-directed brokerage":
+    if is_fidelity_retirement_account(bank, normalized, text):
         return RETIREMENT_RESTRICTED
 
     if any(keyword in text for keyword in LIABILITY_KEYWORDS) or float(balance or 0) < 0:
@@ -135,7 +149,7 @@ def should_sync_transactions(bank, account, rule=None):
     bank_text = (bank or "").lower()
     if any(keyword in text for keyword in LIABILITY_KEYWORDS):
         return True, ""
-    if "fidelity" in bank_text and normalized == "self-directed brokerage":
+    if is_fidelity_retirement_account(bank, normalized, text):
         return False, "retirement_or_restricted_account"
     if any(keyword in text for keyword in RETIREMENT_KEYWORDS):
         return False, "retirement_or_restricted_account"
