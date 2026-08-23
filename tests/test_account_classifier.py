@@ -7,6 +7,8 @@ def test_retirement_restricted_accounts():
         ("Robinhood", "Robinhood Roth IRA (0799)"),
         ("Fidelity Investments", "Brokerage Health Savings (6355)"),
         ("Fidelity Investments", "Self-Directed Brokerage (3743)"),
+        ("Fidelity Investments", "BrokerageLink (3743)"),
+        ("Fidelity Investments", "CAPITAL ONE FINANCIAL CORPORATION ASSOCIATE SAVINGS PLAN (2683)"),
     ]
     for bank, account in cases:
         assert ac.classify_account(bank, account, 100) == ac.RETIREMENT_RESTRICTED
@@ -39,6 +41,17 @@ def test_fidelity_self_directed_brokerage_skips_inbox_sync_as_retirement():
     included, reason = ac.should_sync_transactions("Fidelity Investments", "Self-Directed Brokerage (3743)")
     assert included is False
     assert reason == "retirement_or_restricted_account"
+
+
+def test_fidelity_plan_accounts_skip_inbox_sync_as_retirement():
+    cases = [
+        "BrokerageLink (3743)",
+        "CAPITAL ONE FINANCIAL CORPORATION ASSOCIATE SAVINGS PLAN (2683)",
+    ]
+    for account in cases:
+        included, reason = ac.should_sync_transactions("Fidelity Investments", account)
+        assert included is False
+        assert reason == "retirement_or_restricted_account"
 
 
 def test_account_rule_overrides_classification_and_inbox_sync():
