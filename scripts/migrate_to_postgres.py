@@ -2,6 +2,7 @@ import sqlite3
 import psycopg2
 import pandas as pd
 import app_secrets
+from postgres_security import secure_postgres_schema
 
 def migrate():
     # 1. Connect to Local SQLite
@@ -76,6 +77,7 @@ def migrate():
     print("Creating tables...")
     cursor.execute(create_tx_table)
     cursor.execute(create_bal_table)
+    secure_postgres_schema(cursor)
     pg_conn.commit()
     
     # 4. Bulk Insert Data

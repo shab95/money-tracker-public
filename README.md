@@ -11,6 +11,22 @@ modules before considering a React rewrite.
 
 ## What The App Does
 
+### Database access security
+
+The Supabase `public` schema is private backend storage. Money Tracker connects
+directly as the Postgres table owner; it does not use Supabase's Data API.
+Postgres initialization enables row-level security on the schema's tables and
+revokes table and sequence privileges from `PUBLIC`, `anon`, and `authenticated`.
+There are deliberately no client access policies. The owner connection continues
+to work because ordinary RLS does not restrict table owners.
+
+Initialization also removes automatic client grants for future tables and
+sequences created by the connected role in `public`. Tables created through
+other roles need their own security configuration. Every Postgres creation path
+in this repository calls `secure_postgres_schema` before committing. Keep that
+call in any new creation path; do not enable `FORCE ROW LEVEL SECURITY` without
+first changing the backend's access model.
+
 ### Inbox
 
 The Inbox is the review queue for new transaction activity.
