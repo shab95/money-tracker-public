@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 
 import config
+from postgres_security import secure_postgres_schema
 
 try:
     import psycopg2
@@ -225,6 +226,7 @@ def init_db():
         _ensure_pg_column(c, "account_rules", "include_in_net_worth", "BOOLEAN")
         _ensure_pg_column(c, "account_rules", "notes", "TEXT")
         _ensure_pg_column(c, "account_rules", "updated_at", "TEXT")
+        secure_postgres_schema(c)
     else:
         # SQLite DDL
         c.execute('''
@@ -385,6 +387,7 @@ def ensure_ml_artifacts_table():
                 metadata TEXT
             );
         ''')
+        secure_postgres_schema(c)
     else:
         c.execute('''
             CREATE TABLE IF NOT EXISTS ml_artifacts (
