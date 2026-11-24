@@ -233,6 +233,84 @@ def test_venmo_import_does_not_duplicate_reviewed_row_with_changed_csv_id(monkey
     assert saved.iloc[0]["category"] == "Restaurants"
 
 
+def test_venmo_reimport_recovers_payment_after_same_amount_charge(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    charge_payload = {
+        "ID": "1234567890123456781",
+        "Datetime": "2026-05-22T13:02:00",
+        "Type": "Charge",
+        "Amount (total)": "- $5.00",
+        "From": "Alex",
+        "To": "Sam",
+        "Note": "Charge note",
+        "Destination": float("nan"),
+    }
+    charge = {
+        "date": "2026-05-22",
+        "amount": 5.0,
+        "description": "Venmo - Alex / Sam",
+        "type": "Expense",
+        "account": "Venmo",
+        "method": "Venmo",
+        "status": "REVIEWED",
+        "category": "Entertainment",
+        "user_notes": "Reviewed charge",
+        "raw_data": str(charge_payload),
+    }
+    legacy_payload = {**charge_payload, "ID": float(charge_payload["ID"])}
+    with db.get_connection() as conn:
+        conn.execute("""
+            INSERT INTO transactions (id, date, amount, description, type, account, method,
+                                      status, category, user_notes, raw_data)
+            VALUES (:id, :date, :amount, :description, :type, :account, :method,
+                    :status, :category, :user_notes, :raw_data)
+        """, {**charge, "id": db.generate_legacy_id(charge), "raw_data": str(legacy_payload)})
+
+    payment_payload = {
+        **charge_payload,
+        "ID": "1234567890123456782",
+        "Datetime": "2026-05-22T13:16:00",
+        "Type": "Payment",
+        "Amount (total)": "+ $5.00",
+        "Note": "Payment note",
+    }
+    payment = {**charge, "type": "Reimbursement", "status": "PENDING",
+               "user_notes": "Payment note", "raw_data": str(payment_payload)}
+    batch = pd.DataFrame([charge, payment])
+
+    assert db.upsert_transactions(batch) == 1
+    assert db.upsert_transactions(batch) == 0
+    saved = db.get_all_transactions().set_index("type")
+    assert len(saved) == 2
+    assert saved.loc["Expense", "status"] == "REVIEWED"
+    assert saved.loc["Expense", "user_notes"] == "Reviewed charge"
+    assert saved.loc["Reimbursement", "user_notes"] == "Payment note"
+
+
+def test_venmo_identity_keeps_distinct_ids_with_identical_payment_details(monkeypatch, tmp_path):
+    db = reload_db(monkeypatch, tmp_path)
+    payload = {
+        "ID": "1234567890123456783",
+        "Datetime": "2026-05-23T13:16:00",
+        "Type": "Payment",
+        "Amount (total)": "+ $5.00",
+        "From": "Alex",
+        "To": "Sam",
+        "Note": "Payment note",
+    }
+    payment = {
+        "date": "2026-05-23",
+        "amount": 5.0,
+        "description": "Venmo - Alex / Sam",
+        "type": "Reimbursement",
+        "method": "Venmo",
+        "raw_data": str(payload),
+    }
+    other_payment = {**payment, "raw_data": str({**payload, "ID": "1234567890123456784"})}
+    assert db.upsert_transactions(pd.DataFrame([payment, other_payment])) == 2
+    assert db.upsert_transactions(pd.DataFrame([payment, other_payment])) == 0
+
+
 def test_venmo_import_does_not_skip_reviewed_bank_side_venmo_row(monkeypatch, tmp_path):
     db = reload_db(monkeypatch, tmp_path)
     reviewed_bank_row = {

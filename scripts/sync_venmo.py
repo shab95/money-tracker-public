@@ -41,13 +41,13 @@ def process_venmo_csv(filepath):
         # Line 4: Balance info
         
         # We try reading with header=2 (0-indexed, so 3rd line)
-        df = pd.read_csv(filepath, header=2)
+        df = pd.read_csv(filepath, header=2, dtype=str)
         
         # Validation: check for 'Datetime' column
         if 'Datetime' not in df.columns:
             # Fallback
             print("   ⚠️ Header not found at row 2, scanning...")
-            df = pd.read_csv(filepath, header=3)
+            df = pd.read_csv(filepath, header=3, dtype=str)
             # If still fails, maybe header=1?
              
     except Exception as e:
