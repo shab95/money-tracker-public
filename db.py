@@ -1,3 +1,4 @@
+import ast
 import sqlite3
 import pandas as pd
 import hashlib
@@ -624,36 +625,81 @@ def is_venmo_import(row):
     return "venmo_import" in tags or account == "venmo" or method == "venmo"
 
 
-def venmo_duplicate_matches_existing(row):
-    if not is_venmo_import(row):
-        return False
+def venmo_statement_identity(row):
+    raw = row.get('raw_data')
+    fields = {}
+    if isinstance(raw, dict):
+        fields = raw
+    elif not is_blank_value(raw):
+        try:
+            payload = ast.parse(str(raw), mode='eval').body
+        except (SyntaxError, ValueError):
+            payload = None
+        if isinstance(payload, ast.Dict):
+            # Older Pandas exports contain bare nan values alongside strings.
+            fields = {
+                key.value: value.value
+                for key, value in zip(payload.keys, payload.values)
+                if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+            }
 
+    raw_id = fields.get('ID')
+    source_id = clean_text(raw_id) if isinstance(raw_id, (str, int)) else ''
+    if not source_id.isdecimal():
+        # Earlier imports could convert long numeric IDs to rounded floats.
+        details = clean_text(row.get('details'))
+        match = re.match(r'Venmo ID: ([0-9]+)(?:;|$)', details)
+        source_id = match[1] if match else ''
+
+    timestamp = clean_text(fields.get('Datetime'))
+    transaction_type = clean_text(fields.get('Type'))
+    if not timestamp or not transaction_type:
+        return source_id, None
+
+    amount = clean_text(fields.get('Amount (total)'))
     try:
-        new_amount = float(row.get('amount'))
+        signed_amount = float(re.sub(r'[$,\s]', '', amount))
+    except ValueError:
+        return source_id, None
+
+    identity = (
+        timestamp,
+        transaction_type,
+        signed_amount,
+        clean_text(fields.get('From')),
+        clean_text(fields.get('To')),
+        clean_text(fields.get('Note')),
+    )
+    return source_id, identity
+
+
+def venmo_duplicate_matches_existing(cursor, row, source, ph):
+    source_id, identity = source
+    try:
+        new_amount = float(row['amount'])
     except (TypeError, ValueError):
-        return False
+        new_amount = None
 
-    min_amount = new_amount - 0.005
-    max_amount = new_amount + 0.005
-    conn = get_connection()
-    ph = '%s' if is_postgres() else '?'
-    try:
-        df = pd.read_sql_query(f'''
-            SELECT id, date, amount, description, account, method
-            FROM transactions
-            WHERE date = {ph}
-              AND description = {ph}
-              AND amount >= {ph}
-              AND amount <= {ph}
-              AND (account = {ph} OR method = {ph})
-        ''', conn, params=(row['date'], row['description'], min_amount, max_amount, 'Venmo', 'Venmo'))
-    finally:
-        conn.close()
-
-    if df.empty:
-        return False
-
-    return True
+    cursor.execute(f'''
+        SELECT raw_data, details, description, amount, type
+        FROM transactions
+        WHERE date = {ph} AND (account = {ph} OR method = {ph})
+    ''', (row['date'], 'Venmo', 'Venmo'))
+    for raw_data, details, description, amount, tx_type in cursor.fetchall():
+        existing_id, existing_identity = venmo_statement_identity({'raw_data': raw_data, 'details': details})
+        if source_id and existing_id:
+            if source_id == existing_id:
+                return True
+            continue
+        if identity is not None and existing_identity is not None:
+            if identity == existing_identity:
+                return True
+            continue
+        # Records without statement data can only be compared by their saved fields.
+        if (description == row['description'] and tx_type == row.get('type', 'Expense')
+                and amount is not None and new_amount is not None and abs(amount - new_amount) <= 0.005):
+            return True
+    return False
 
 
 def get_review_audit_values(row):
@@ -685,18 +731,20 @@ def upsert_transactions(df):
     ph = '%s' if is_postgres() else '?'
     
     for _, row in df.iterrows():
-        # Ensure ID exists
-        if 'id' not in row or is_blank_value(row['id']):
-            tx_id = generate_id(row)
-        else:
-            tx_id = row['id']
-        legacy_ids = generate_legacy_id_candidates(row)
-            
         try:
-            if tx_id not in legacy_ids and legacy_duplicate_matches_existing(row, legacy_ids):
-                continue
-            if venmo_duplicate_matches_existing(row):
-                continue
+            tx_id = generate_id(row) if is_blank_value(row.get('id')) else row['id']
+            if is_venmo_import(row):
+                source_id, identity = venmo_statement_identity(row)
+                if venmo_duplicate_matches_existing(c, row, (source_id, identity), ph):
+                    continue
+                if source_id:
+                    tx_id = 'venmo:' + source_id
+                elif identity is not None:
+                    tx_id = 'venmo:' + hashlib.sha256(repr(identity).encode()).hexdigest()
+            else:
+                legacy_ids = generate_legacy_id_candidates(row)
+                if tx_id not in legacy_ids and legacy_duplicate_matches_existing(row, legacy_ids):
+                    continue
 
             # We use INSERT OR IGNORE (SQLite) / ON CONFLICT DO NOTHING (Postgres)
             # Need strict values list

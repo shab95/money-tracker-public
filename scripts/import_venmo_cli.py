@@ -18,7 +18,7 @@ def import_venmo():
         # 1. Read CSV (Skip row 1-2, Header at 3)
         # Wait, user's previous file had header at row 3 (index 2).
         # Let's assume consistent format.
-        df = pd.read_csv(FILE_PATH, header=2)
+        df = pd.read_csv(FILE_PATH, header=2, dtype=str)
         df.columns = df.columns.str.strip()
         
         if 'ID' not in df.columns:
